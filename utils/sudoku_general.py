@@ -1,5 +1,5 @@
 import math
-from utils.general_utils import var
+from utils.general_utils import sudoku_var
 
 def decode_sudoku(solution, n):
     grid = [[0] * n for _ in range(n)]
@@ -46,7 +46,7 @@ def generate_sudoku_clauses(grid):
     # -----------------------------
     for r in range(1, n + 1):
         for c in range(1, n + 1):
-            clauses.append([var(r, c, val) for val in range(1, n + 1)])
+            clauses.append([sudoku_var(r, c, val) for val in range(1, n + 1)])
 
     # -----------------------------
     # 2️⃣ celula are max 1 valoare
@@ -55,7 +55,7 @@ def generate_sudoku_clauses(grid):
         for c in range(1, n + 1):
             for v1 in range(1, n + 1):
                 for v2 in range(v1 + 1, n + 1):
-                    clauses.append([-var(r, c, v1), -var(r, c, v2)])
+                    clauses.append([-sudoku_var(r, c, v1), -sudoku_var(r, c, v2)])
 
     # -----------------------------
     # 3️⃣ fiecare valoare o data pe rand
@@ -64,7 +64,7 @@ def generate_sudoku_clauses(grid):
         for val in range(1, n + 1):
             for c1 in range(1, n + 1):
                 for c2 in range(c1 + 1, n + 1):
-                    clauses.append([-var(r, c1, val), -var(r, c2, val)])
+                    clauses.append([-sudoku_var(r, c1, val), -sudoku_var(r, c2, val)])
 
     # -----------------------------
     # 4️⃣ fiecare valoare o data pe coloana
@@ -73,7 +73,7 @@ def generate_sudoku_clauses(grid):
         for val in range(1, n + 1):
             for r1 in range(1, n + 1):
                 for r2 in range(r1 + 1, n + 1):
-                    clauses.append([-var(r1, c, val), -var(r2, c, val)])
+                    clauses.append([-sudoku_var(r1, c, val), -sudoku_var(r2, c, val)])
 
     # -----------------------------
     # 5️⃣ blocuri k x k
@@ -92,8 +92,8 @@ def generate_sudoku_clauses(grid):
                         r1, c1 = cells[i]
                         r2, c2 = cells[j]
                         clauses.append([
-                            -var(r1, c1, val),
-                            -var(r2, c2, val)
+                            -sudoku_var(r1, c1, val),
+                            -sudoku_var(r2, c2, val)
                         ])
 
     # -----------------------------
@@ -102,7 +102,7 @@ def generate_sudoku_clauses(grid):
     for r in range(n):
         for c in range(n):
             if grid[r][c] != 0:
-                clauses.append([var(r + 1, c + 1, grid[r][c])])
+                clauses.append([sudoku_var(r + 1, c + 1, grid[r][c])])
 
     return clauses
 

@@ -4,6 +4,9 @@ from solvers.heuristics import choose_variable_basic
 import utils.colored_text as txt
 
 
+def _cancel_requested(cancel_token):
+    return cancel_token is not None and cancel_token.is_cancelled()
+
 
 def dpll_debug(clauses, assignment=None, level=0, choose_var_fn=None):
     """
@@ -86,12 +89,17 @@ def dpll_debug(clauses, assignment=None, level=0, choose_var_fn=None):
 
 
 
-def dpll(clauses, assignment=None, choose_var_fn=None):
+def dpll(clauses, assignment=None, choose_var_fn=None, cancel_token=None):
     """
-    returneaza:
-    - dict (solutie) daca SAT
-    - None daca UNSAT
+    Algoritmul DPLL pentru SAT.
+
+    Returneaza:
+    - dictionar {variabila: True/False} daca formula este SAT
+    - None daca formula este UNSAT
     """
+    if _cancel_requested(cancel_token):
+        return None
+
     if assignment is None:
         assignment = {}
 
@@ -102,6 +110,9 @@ def dpll(clauses, assignment=None, choose_var_fn=None):
     result = unit_propagate(clauses, assignment.copy())
 
     if result is None:
+        return None
+
+    if _cancel_requested(cancel_token):
         return None
 
     clauses, assignment = result
@@ -115,6 +126,8 @@ def dpll(clauses, assignment=None, choose_var_fn=None):
 
     # 4️⃣ backtracking search
     for value in [True, False]:
+        if _cancel_requested(cancel_token):
+            return None
 
         new_assignment = assignment.copy()
         new_assignment[var] = value
@@ -140,7 +153,7 @@ def dpll(clauses, assignment=None, choose_var_fn=None):
                 new_clauses.append(c)
 
         else:
-            result = dpll(new_clauses, new_assignment, choose_var_fn)
+            result = dpll(new_clauses, new_assignment, choose_var_fn, cancel_token=cancel_token)
 
             if result is not None:
                 return result

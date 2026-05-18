@@ -1,247 +1,456 @@
-from utils.general_utils import  indent
-from solvers.solver_utils import unit_propagate_cdcl
-from solvers.heuristics import choose_variable_basic
-import utils.colored_text as txt
+from collections import defaultdict
+from dataclasses import dataclass
+import time
 
-def cdcl(clauses, choose_var_fn=None):
-    if choose_var_fn is None:
-        choose_var_fn = choose_variable_basic
-
-    assignment = {}   # var -> (value, level)
-    level = 0
-
-    print(txt.BOLD + txt.CYAN + "Starting CDCL" + txt.RESET)
-
-    while True:
-        # print('\n'+'-'*level + '-'*txt.separator_lenght)
-        # print(indent(level) + txt.BLUE + f"Clauses: {clauses}" + txt.RESET)
-        # print(indent(level) + txt.GREEN + f"Assignment: {assignment}" + txt.RESET)
-        # print('-'*level + '-'*txt.separator_lenght)
-
-        result = unit_propagate_cdcl(clauses, assignment, level)
-
-        # 🔴 CONFLICT
-        if result is None:
-            
-            if level == 0:
-                print(txt.RED + "UNSAT" + txt.RESET)
-                return None
-
-            print(txt.RED + f"Conflict detected at level {level} → learning clause" + txt.RESET)
-
-            # 🔥 învățăm clauză simplă (toate variabilele la nivel curent negate)
-            learned = []
-
-            for var, (val, lvl) in assignment.items():
-                if lvl == level:
-                    lit = -var if val else var
-                    learned.append(lit)
-
-            if not learned:
-                print(txt.RED + "Empty learned clause → UNSAT" + txt.RESET)
-                return None
-
-            print(txt.YELLOW + f"Learned clause: {learned}" + txt.RESET)
-
-            clauses.append(learned)
-
-            # 🔁 backjump simplu
-            level -= 1
-
-            # eliminăm variabilele de nivel curent
-            assignment = {
-                v: (val, lvl)
-                for v, (val, lvl) in assignment.items()
-                if lvl <= level
-            }
-
-            continue
-
-        # clauses = simplify_clauses(clauses, assignment)
-
-        # if clauses is None:
-        #     result = None
-        #     continue
-
-        clauses, assignment = result
-
-        # SAT
-        if not clauses:
-            print(txt.GREEN + "SAT FOUND (CDCL) ✅" + txt.RESET)
-            return {v: val for v, (val, _) in assignment.items()}
-
-        # decizie
-        # 🔍 ALEGERE VARIABILA
-        simple_assignment = {v: val for v, (val, _) in assignment.items()}
-        var = choose_var_fn(clauses, simple_assignment)
-
-         # 🔴 PROTECTIE BUG
-        if var is None:
-            print(txt.RED + "No variable left → possible SAT/UNSAT inconsistency" + txt.RESET)
-            return {v: val for v, (val, _) in assignment.items()}
-
-         # ➕ DECIZIE
-        level += 1
-
-        print(txt.CYAN + f"Decision: {var} = True at level {level}" + txt.RESET)
-
-        assignment[var] = (True, level)
+from sat_core.runtime import cancel_requested
 
 
-def simplify_clauses(clauses, assignment):
-    new_clauses = []
+@dataclass(eq=False)
+class Clause:
+    lits: list[int]
+    learnt: bool = False
+    watch1: int = 0
+    watch2: int = 0
+
+
+def _normalise_formula(clauses):
+    """
+    Remove duplicate literals and skip tautologies like (x OR not x).
+
+    A tautological clause is always true, so it does not constrain the solver.
+    If an empty clause remains, the formula is immediately UNSAT.
+    """
+    clean_clauses = []
+    variables = set()
+    has_empty_clause = False
 
     for clause in clauses:
-        satisfied = False
-        new_clause = []
+        seen = set()
+        clean = []
+        tautology = False
 
         for lit in clause:
+            lit = int(lit)
+            if lit == 0:
+                continue
+            if -lit in seen:
+                tautology = True
+                break
+            if lit not in seen:
+                seen.add(lit)
+                clean.append(lit)
+                variables.add(abs(lit))
+
+        if tautology:
+            continue
+        if not clean:
+            has_empty_clause = True
+        else:
+            clean_clauses.append(clean)
+
+    max_var = max(variables) if variables else 0
+    return clean_clauses, sorted(variables), max_var, has_empty_clause
+
+
+def _dedupe_clause(lits):
+    clean = []
+    seen = set()
+
+    for lit in lits:
+        if lit not in seen:
+            clean.append(lit)
+            seen.add(lit)
+
+    return clean
+
+
+def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, cancel_token=None):
+    """
+    Conflict-Driven Clause Learning SAT solver.
+
+    Return:
+    - dict {variable: True/False} if SAT
+    - None if UNSAT
+    - (solution, stats) when return_stats=True
+    """
+    started = time.perf_counter()
+    stats = {
+        "status": "UNKNOWN",
+        "decisions": 0,
+        "propagations": 0,
+        "conflicts": 0,
+        "learned_clauses": 0,
+        "elapsed": 0.0,
+    }
+
+    def finish(solution, status):
+        stats["status"] = status
+        stats["elapsed"] = time.perf_counter() - started
+        if return_stats:
+            return solution, stats
+        return solution
+
+    if cancel_requested(cancel_token):
+        return finish(None, "CANCELLED")
+
+    normalised, variables, max_var, has_empty_clause = _normalise_formula(clauses)
+
+    if has_empty_clause:
+        return finish(None, "UNSAT")
+
+    if not normalised:
+        return finish({}, "SAT")
+
+    # Arrays are faster than dictionaries. They are indexed by variable id.
+    assignment = [None] * (max_var + 1)   # None, True, or False
+    levels = [0] * (max_var + 1)          # decision level of each assignment
+    reasons = [None] * (max_var + 1)      # clause that forced each propagation
+    saved_phase = [None] * (max_var + 1)  # last value used for each variable
+    activity = [0.0] * (max_var + 1)      # VSIDS-like score
+    preferred_phase = [True] * (max_var + 1)
+
+    clauses_db = []
+    watches = defaultdict(list)
+    cancelled = object()
+
+    # The trail is the chronological assignment stack. Each item is a literal:
+    #  x means x=True, -x means x=False. trail_lim stores where each decision
+    # level begins, so backjumping can erase whole levels at once.
+    trail = []
+    trail_lim = []
+    qhead = 0
+
+    var_inc = 1.0
+    var_decay = 0.95
+
+    polarity_score = [0] * (max_var + 1)
+    for clause in normalised:
+        for lit in clause:
             var = abs(lit)
+            activity[var] += 1.0
+            polarity_score[var] += 1 if lit > 0 else -1
 
-            if var in assignment:
-                val = assignment[var][0]
+    for var in variables:
+        preferred_phase[var] = polarity_score[var] >= 0
 
-                if (lit > 0 and val) or (lit < 0 and not val):
-                    satisfied = True
+    def current_level():
+        return len(trail_lim)
+
+    def lit_value(lit):
+        value = assignment[abs(lit)]
+        if value is None:
+            return None
+        return value if lit > 0 else not value
+
+    def enqueue(lit, reason):
+        """
+        Assign a literal.
+
+        reason=None means this is a decision. Otherwise reason is the clause
+        that became unit and forced the assignment.
+        """
+        var = abs(lit)
+        value = lit > 0
+        current = assignment[var]
+
+        if current is not None:
+            return current == value
+
+        assignment[var] = value
+        levels[var] = current_level()
+        reasons[var] = reason
+        saved_phase[var] = value
+        trail.append(lit)
+
+        if reason is not None:
+            stats["propagations"] += 1
+
+        return True
+
+    def attach_clause(clause):
+        """
+        Watch two literals in the clause.
+
+        During propagation we only revisit clauses watching the literal that
+        just became false. That avoids scanning every clause after every
+        assignment, which is the main practical speedup over simple DPLL.
+        """
+        clauses_db.append(clause)
+
+        if len(clause.lits) == 1:
+            clause.watch1 = 0
+            clause.watch2 = 0
+            watches[clause.lits[0]].append(clause)
+            return
+
+        clause.watch1 = 0
+        clause.watch2 = 1
+        watches[clause.lits[clause.watch1]].append(clause)
+        watches[clause.lits[clause.watch2]].append(clause)
+
+    def add_clause(lits, learnt=False):
+        clause = Clause(list(lits), learnt=learnt)
+        attach_clause(clause)
+        return clause
+
+    for lits in normalised:
+        if cancel_requested(cancel_token):
+            return finish(None, "CANCELLED")
+
+        clause = add_clause(lits)
+        if len(lits) == 1 and not enqueue(lits[0], clause):
+            return finish(None, "UNSAT")
+
+    def propagate():
+        """
+        Boolean constraint propagation using watched literals.
+
+        If a watched literal becomes false, the clause tries to watch another
+        non-false literal. If it cannot, either the clause is conflicting or it
+        has become unit and forces the other watched literal.
+        """
+        nonlocal qhead
+
+        while qhead < len(trail):
+            if cancel_requested(cancel_token):
+                return cancelled
+
+            false_lit = -trail[qhead]
+            qhead += 1
+
+            watch_list = watches[false_lit]
+            i = 0
+
+            while i < len(watch_list):
+                if cancel_requested(cancel_token):
+                    return cancelled
+
+                clause = watch_list[i]
+
+                if clause.lits[clause.watch1] == false_lit:
+                    false_watch = clause.watch1
+                    other_watch = clause.watch2
+                elif clause.lits[clause.watch2] == false_lit:
+                    false_watch = clause.watch2
+                    other_watch = clause.watch1
+                else:
+                    # Defensive guard for stale watches; normally not reached.
+                    i += 1
+                    continue
+
+                other_lit = clause.lits[other_watch]
+
+                if lit_value(other_lit) is True:
+                    i += 1
+                    continue
+
+                moved_watch = False
+                for new_watch, new_lit in enumerate(clause.lits):
+                    if new_watch == clause.watch1 or new_watch == clause.watch2:
+                        continue
+
+                    if lit_value(new_lit) is not False:
+                        if false_watch == clause.watch1:
+                            clause.watch1 = new_watch
+                        else:
+                            clause.watch2 = new_watch
+
+                        watches[new_lit].append(clause)
+                        watch_list[i] = watch_list[-1]
+                        watch_list.pop()
+                        moved_watch = True
+                        break
+
+                if moved_watch:
+                    continue
+
+                if lit_value(other_lit) is False:
+                    return clause
+
+                if not enqueue(other_lit, clause):
+                    return clause
+
+                i += 1
+
+        return None
+
+    def bump_var(var):
+        nonlocal var_inc
+
+        activity[var] += var_inc
+
+        # Keep floating point values bounded during long runs.
+        if activity[var] > 1e100:
+            for v in variables:
+                activity[v] *= 1e-100
+            var_inc *= 1e-100
+
+    def decay_activity():
+        nonlocal var_inc
+        var_inc /= var_decay
+
+    def analyse_conflict(conflict_clause):
+        """
+        First-UIP conflict analysis.
+
+        The learned clause is built by resolving the conflict clause with the
+        reasons of current-level assignments until only one current-level
+        literal remains. That literal is the first UIP, and the learned clause
+        becomes asserting after we backjump.
+        """
+        seen = [False] * (max_var + 1)
+        learnt = []
+        path_count = 0
+        scan = len(trail) - 1
+        clause = conflict_clause
+        skip_var = None
+        decision_level = current_level()
+
+        while True:
+            for lit in clause.lits:
+                var = abs(lit)
+
+                if var == skip_var or seen[var] or levels[var] == 0:
+                    continue
+
+                seen[var] = True
+                bump_var(var)
+
+                if levels[var] == decision_level:
+                    path_count += 1
+                else:
+                    learnt.append(lit)
+
+            while scan >= 0:
+                pivot = trail[scan]
+                scan -= 1
+                if seen[abs(pivot)]:
                     break
             else:
-                new_clause.append(lit)
+                # This should not happen for a normal implication graph, but
+                # returning a learned clause is better than hiding the failure.
+                return _dedupe_clause(conflict_clause.lits), 0
 
-        if satisfied:
+            pivot_var = abs(pivot)
+            seen[pivot_var] = False
+            path_count -= 1
+
+            reason = reasons[pivot_var]
+
+            if path_count == 0:
+                learnt.insert(0, -pivot)
+                break
+
+            if reason is None:
+                learnt.insert(0, -pivot)
+                break
+
+            clause = reason
+            skip_var = pivot_var
+
+        learnt = _dedupe_clause(learnt)
+
+        # All literals except learnt[0] are false at the backjump level.
+        # Jump to the highest of those levels so learnt[0] becomes unit.
+        backjump_level = 0
+        for lit in learnt[1:]:
+            backjump_level = max(backjump_level, levels[abs(lit)])
+
+        return learnt, backjump_level
+
+    def backtrack(level):
+        """
+        Remove all assignments above 'level'.
+
+        This is the "non-chronological" part of CDCL: after learning, we jump
+        directly to the useful level instead of undoing one decision at a time.
+        """
+        nonlocal qhead
+
+        while current_level() > level:
+            start = trail_lim.pop()
+
+            for lit in reversed(trail[start:]):
+                var = abs(lit)
+                assignment[var] = None
+                levels[var] = 0
+                reasons[var] = None
+
+            del trail[start:]
+
+        qhead = min(qhead, len(trail))
+
+    def pick_branch_var():
+        best_var = None
+        best_score = -1.0
+
+        for var in variables:
+            if assignment[var] is None and activity[var] > best_score:
+                best_var = var
+                best_score = activity[var]
+
+        return best_var
+
+    while True:
+        if cancel_requested(cancel_token):
+            return finish(None, "CANCELLED")
+
+        conflict = propagate()
+
+        if conflict is cancelled:
+            return finish(None, "CANCELLED")
+
+        if conflict is not None:
+            stats["conflicts"] += 1
+
+            if current_level() == 0:
+                return finish(None, "UNSAT")
+
+            if max_conflicts is not None and stats["conflicts"] >= max_conflicts:
+                return finish(None, "UNKNOWN")
+
+            learnt_lits, backjump_level = analyse_conflict(conflict)
+            decay_activity()
+
+            if not learnt_lits:
+                return finish(None, "UNSAT")
+
+            learnt_lits = _dedupe_clause(learnt_lits)
+            learnt_clause = add_clause(learnt_lits, learnt=True)
+            stats["learned_clauses"] += 1
+
+            backtrack(backjump_level)
+
+            # The learned clause is now unit. Enqueueing its first literal makes
+            # the solver immediately avoid the same conflict pattern.
+            if not enqueue(learnt_lits[0], learnt_clause):
+                if current_level() == 0:
+                    return finish(None, "UNSAT")
+                continue
+
             continue
 
-        if not new_clause:
-            return None  # conflict
+        decision_var = pick_branch_var()
 
-        new_clauses.append(new_clause)
+        if decision_var is None:
+            solution = {var: assignment[var] for var in variables if assignment[var] is not None}
+            return finish(solution, "SAT")
 
-    return new_clauses
+        trail_lim.append(len(trail))
+        stats["decisions"] += 1
+
+        if saved_phase[decision_var] is None:
+            value = preferred_phase[decision_var]
+        else:
+            value = saved_phase[decision_var]
+
+        enqueue(decision_var if value else -decision_var, reason=None)
 
 
 def cdcl_debug(clauses, max_steps=5000):
-    assignment = {}
-    decision_level = 0
-    trail = []
-    step = 0
-    seen_conflicts = set()
+    """
+    Compatibility wrapper for older experiments.
 
-    def log(msg):
-        nonlocal step
-        if step % 50 == 0:  # nu spam
-            print(f"[step {step}] {msg}")
-
-    def val(lit):
-        v = abs(lit)
-        if v not in assignment:
-            return None
-        return assignment[v] if lit > 0 else not assignment[v]
-
-    def print_state():
-        if step % 100 == 0:
-            small = {k: assignment[k] for k in list(assignment)[:10]}
-            print(f"   assignment size={len(assignment)} sample={small}")
-
-    def unit_propagate():
-        changed = True
-
-        while changed:
-            changed = False
-
-            for c in clauses:
-                vals = [val(l) for l in c]
-
-                if True in vals:
-                    continue
-
-                unassigned = [l for l, v in zip(c, vals) if v is None]
-
-                if len(unassigned) == 0:
-                    print(f"❌ CONFLICT clause={c} level={decision_level}")
-                    return tuple(sorted(c))
-
-                if len(unassigned) == 1:
-                    lit = unassigned[0]
-                    v = abs(lit)
-
-                    if v in assignment and assignment[v] != (lit > 0):
-                        print(f"⚠️ DIRECT CONFLICT on var {v}")
-                        return tuple(sorted(c))
-
-                    if v not in assignment:
-                        assignment[v] = (lit > 0)
-                        trail.append(v)
-                        log(f"🔵 UNIT PROP: {v} = {assignment[v]}")
-
-                        changed = True
-
-        return None
-
-    def pick_var():
-        for c in clauses:
-            for l in c:
-                v = abs(l)
-                if v not in assignment:
-                    return v
-        return None
-
-    def backjump():
-        nonlocal decision_level
-
-        if trail:
-            v = trail.pop()
-            print(f"↩️ BACKTRACK remove {v}")
-
-            if v in assignment:
-                del assignment[v]
-
-        decision_level = max(0, decision_level - 1)
-
-    print("🚀 START CDCL DEBUG")
-
-    while step < max_steps:
-        step += 1
-
-        conflict = unit_propagate()
-
-        # 🔴 CONFLICT
-        if conflict:
-            print(f"💥 CONFLICT at level {decision_level}")
-
-            if decision_level == 0:
-                print("💀 UNSAT")
-                return None
-
-            if conflict in seen_conflicts:
-                print("♻️ repeated conflict → backjump harder")
-                backjump()
-                continue
-
-            seen_conflicts.add(conflict)
-
-            print(f"📌 learning conflict clause: {conflict}")
-
-            backjump()
-            continue
-
-        # SAT CHECK
-        if all(any(val(l) for l in c) for c in clauses):
-            print("✅ SAT FOUND")
-            return assignment
-
-        var = pick_var()
-
-        if var is None:
-            print("⚠️ no variable left")
-            return assignment
-
-        decision_level += 1
-
-        value = (decision_level % 2 == 0)
-        assignment[var] = value
-        trail.append(var)
-
-        log(f"🟢 DECISION: {var} = {value} (level {decision_level})")
-        print_state()
-
-    print("⛔ STOP: max steps reached")
-    return None
+    max_steps maps to max_conflicts because the new solver is conflict-driven.
+    """
+    return cdcl(clauses, max_conflicts=max_steps)

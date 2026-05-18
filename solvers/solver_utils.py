@@ -65,8 +65,11 @@ def unit_propagate_debug(clauses, assignment):
 
 def unit_propagate(clauses, assignment):
     """
-    clauses = lista de clauze
-    assignment = dict {var: True/False}
+    Algoritmul DPLL pentru SAT.
+
+    Returneaza:
+    - dictionar {variabila: True/False} daca formula este SAT
+    - None daca formula este UNSAT
     """
 
     changed = True
