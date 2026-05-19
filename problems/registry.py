@@ -5,6 +5,19 @@ from problems.graph_coloring import (
     manual_graph_coloring_problem,
     random_graph_coloring_problem,
 )
+from problems.hamiltonian_path import (
+    average_degree_hamiltonian_path_problem,
+    exact_edges_hamiltonian_path_problem,
+    manual_hamiltonian_path_problem,
+    random_hamiltonian_path_problem,
+)
+from problems.independent_set import (
+    average_degree_independent_set_problem,
+    exact_edges_independent_set_problem,
+    manual_independent_set_problem,
+    random_independent_set_problem,
+)
+from problems.n_queens import n_queens_problem
 from problems.sudoku import sudoku_problem
 
 
@@ -14,5 +27,14 @@ PROBLEM_TYPES = {
     "Graph Coloring Random": random_graph_coloring_problem,
     "Graph Coloring Exact Edges": exact_edges_graph_coloring_problem,
     "Graph Coloring Average Degree": average_degree_graph_coloring_problem,
+    "N-Queens": n_queens_problem,
+    "Hamiltonian Path Manual": manual_hamiltonian_path_problem,
+    "Hamiltonian Path Random": random_hamiltonian_path_problem,
+    "Hamiltonian Path Exact Edges": exact_edges_hamiltonian_path_problem,
+    "Hamiltonian Path Average Degree": average_degree_hamiltonian_path_problem,
+    "Independent Set Manual": manual_independent_set_problem,
+    "Independent Set Random": random_independent_set_problem,
+    "Independent Set Exact Edges": exact_edges_independent_set_problem,
+    "Independent Set Average Degree": average_degree_independent_set_problem,
     "DIMACS": dimacs_problem_from_text,
 }

@@ -3,7 +3,7 @@ import time
 import tkinter as tk
 import random
 
-from app import SATApp
+from app import BENCHMARK_PROBLEMS, PROBLEM_KINDS, SATApp, SUDOKU_SIZES
 from problems.dimacs_problem import dimacs_problem_from_text
 from problems.graph_coloring import (
     average_degree_graph_coloring_problem,
@@ -13,9 +13,13 @@ from problems.graph_coloring import (
     parse_edge_list,
     random_graph_coloring_problem,
 )
-from problems.sudoku import sudoku_problem
+from problems.hamiltonian_path import hamiltonian_var, manual_hamiltonian_path_problem
+from problems.independent_set import independent_var, manual_independent_set_problem
+from problems.n_queens import n_queens_problem, n_queens_var
+from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.benchmark import graph_coloring_sweep
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
+from sat_core.models import BenchmarkRow
 from sat_core.runtime import EVENT_LOG, RunEvent
 from sat_core.solver_runner import solve_problem
 from utils.general_utils import color_var, sudoku_var
@@ -59,6 +63,37 @@ class AppBackendTests(unittest.TestCase):
         }
 
         self.assertEqual(problem.decode_solution(solution), solved_grid)
+
+    def test_sudoku_25x25_is_supported_by_app_and_validator(self):
+        self.assertIn(25, SUDOKU_SIZES)
+        validate_sudoku_grid([[0] * 25 for _ in range(25)])
+
+    def test_n_queens_problem_solves_and_decodes(self):
+        problem = n_queens_problem(4)
+
+        self.assertIn([n_queens_var(1, 1, 4), n_queens_var(1, 2, 4), n_queens_var(1, 3, 4), n_queens_var(1, 4, 4)], problem.clauses)
+
+        result = solve_problem(problem, "CDCL")
+
+        self.assertEqual(result.status, "SAT")
+        self.assertEqual(len(result.decoded["positions"]), 4)
+        self.assertEqual(len(result.decoded["board"]), 4)
+
+    def test_hamiltonian_path_problem_sat_and_unsat(self):
+        sat_problem = manual_hamiltonian_path_problem(3, "1-2, 2-3")
+        unsat_problem = manual_hamiltonian_path_problem(3, "1-2")
+
+        self.assertIn([hamiltonian_var(1, 1, 3), hamiltonian_var(1, 2, 3), hamiltonian_var(1, 3, 3)], sat_problem.clauses)
+        self.assertEqual(solve_problem(sat_problem, "CDCL").status, "SAT")
+        self.assertEqual(solve_problem(unsat_problem, "CDCL").status, "UNSAT")
+
+    def test_independent_set_problem_sat_and_unsat(self):
+        sat_problem = manual_independent_set_problem(3, 2, "1-2")
+        unsat_problem = manual_independent_set_problem(3, 2, "1-2, 1-3, 2-3")
+
+        self.assertIn([independent_var(1, 1, 3), independent_var(1, 2, 3), independent_var(1, 3, 3)], sat_problem.clauses)
+        self.assertEqual(solve_problem(sat_problem, "CDCL").status, "SAT")
+        self.assertEqual(solve_problem(unsat_problem, "CDCL").status, "UNSAT")
 
     def test_graph_coloring_manual_encoder(self):
         problem = manual_graph_coloring_problem(2, 2, "1-2")
@@ -173,6 +208,72 @@ class AppBackendTests(unittest.TestCase):
         try:
             app = SATApp(root)
             self.assertIsNone(app.current_problem)
+            self.assertEqual(app.solve_timeout_seconds.get(), "30")
+            self.assertEqual(app.bench_timeout_seconds.get(), "30")
+            self.assertEqual(app._benchmark_bar_color("TIMEOUT"), "#f58518")
+            self.assertEqual(app._benchmark_bar_color("SKIPPED"), "#bab0ab")
+            row = BenchmarkRow(
+                case_name="Hamiltonian Path n10_p30",
+                problem_type="Hamiltonian Path",
+                solver="CDCL",
+                status="SAT",
+                elapsed=0.1,
+                clauses=1,
+                variables=1,
+                repeat=1,
+            )
+            self.assertEqual(app._benchmark_chart_label(row), "n10_p30\nCDCL")
+            app.benchmark_rows = [row]
+            self.assertEqual(app._benchmark_chart_title("Raw Time"), "Hamiltonian Path - Raw Time")
+            self.assertIn("N-Queens", PROBLEM_KINDS)
+            self.assertIn("Hamiltonian Path", PROBLEM_KINDS)
+            self.assertIn("Independent Set", PROBLEM_KINDS)
+            self.assertIn("N-Queens", BENCHMARK_PROBLEMS)
+
+            self.assertEqual(app.problem_description.get(), "Fill an n x n grid so each row, column, and square box contains every value exactly once.")
+            self.assertEqual(str(app.solver_log_box.cget("state")), "disabled")
+            app.advanced_solver_logs.set(True)
+            app._refresh_solver_log_controls()
+            self.assertEqual(str(app.solver_log_box.cget("state")), "readonly")
+
+            app.problem_kind.set("Graph Coloring")
+            app._refresh_problem_form()
+            self.assertEqual(str(app.graph_field_entries["probability"].cget("state")), "disabled")
+            self.assertEqual(str(app.edge_text.cget("state")), "normal")
+            app.graph_mode.set("Average degree")
+            app._refresh_graph_controls()
+            self.assertEqual(str(app.graph_field_entries["average_degree"].cget("state")), "normal")
+            self.assertEqual(str(app.graph_field_entries["probability"].cget("state")), "disabled")
+            self.assertEqual(str(app.edge_text.cget("state")), "disabled")
+
+            app.bench_problem.set("Sudoku")
+            app._refresh_benchmark_form()
+            self.assertEqual(app._selected_sudoku_benchmark_sizes(), [4, 9])
+            self.assertEqual(str(app.skip_benchmark_button.cget("state")), "disabled")
+            app.active_process_skip = object()
+            app._set_run_active(True, "Benchmarking")
+            self.assertEqual(str(app.skip_benchmark_button.cget("state")), "normal")
+            app._set_run_active(False)
+            app.active_process_skip = None
+            app._refresh_skip_button_state()
+            self.assertEqual(str(app.skip_benchmark_button.cget("state")), "disabled")
+            self.assertFalse(app.bench_sudoku_size_vars[16].get())
+            self.assertFalse(app.bench_sudoku_size_vars[25].get())
+            self.assertEqual(str(app.bench_log_box.cget("state")), "disabled")
+            app.bench_advanced_solver_logs.set(True)
+            app._refresh_benchmark_log_controls()
+            self.assertEqual(str(app.bench_log_box.cget("state")), "readonly")
+            app.bench_problem.set("Hamiltonian Path")
+            app._refresh_benchmark_form()
+            self.assertEqual(set(app.bench_graph_mode_buttons), {"Probability", "Exact edges", "Average degree"})
+            self.assertEqual(str(app.bench_graph_mode_buttons["Probability"].cget("text")), "G(n,p)")
+            self.assertEqual(str(app.bench_graph_mode_buttons["Exact edges"].cget("text")), "G(n,m)")
+            self.assertEqual(str(app.bench_graph_mode_buttons["Average degree"].cget("text")), "G(n,d)")
+            self.assertEqual(str(app.bench_graph_field_entries["probabilities"].cget("state")), "normal")
+            app.bench_generation_mode.set("Exact edges")
+            app._refresh_benchmark_graph_controls()
+            self.assertEqual(str(app.bench_graph_field_entries["edge_counts"].cget("state")), "normal")
+            self.assertEqual(str(app.bench_graph_field_entries["probabilities"].cget("state")), "disabled")
         finally:
             root.destroy()
 

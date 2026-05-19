@@ -59,6 +59,7 @@ class BenchmarkRow:
     clauses: int
     variables: int
     repeat: int
+    detail: str = ""
     conflicts: int | str = "-"
     decisions: int | str = "-"
     propagations: int | str = "-"
@@ -70,6 +71,7 @@ class BenchmarkRow:
         return [
             self.case_name,
             self.problem_type,
+            self.detail,
             self.solver,
             self.status,
             f"{self.elapsed:.8f}",
@@ -88,6 +90,7 @@ class BenchmarkRow:
 BENCHMARK_HEADERS = [
     "case_name",
     "problem_type",
+    "detail",
     "solver",
     "status",
     "elapsed",

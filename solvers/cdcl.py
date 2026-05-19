@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import time
 
-from sat_core.runtime import cancel_requested
+from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requested
 
 
 @dataclass(eq=False)
@@ -64,7 +64,14 @@ def _dedupe_clause(lits):
     return clean
 
 
-def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, cancel_token=None):
+def cdcl(
+    clauses,
+    max_conflicts=None,
+    return_stats=False,
+    event_callback=None,
+    cancel_token=None,
+    logging_options=None,
+):
     """
     Conflict-Driven Clause Learning SAT solver.
 
@@ -82,6 +89,50 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
         "learned_clauses": 0,
         "elapsed": 0.0,
     }
+    logging_options = logging_options or {}
+    log_mode = logging_options.get("mode", "normal")
+    if log_mode not in ("normal", "periodic", "debug"):
+        log_mode = "normal"
+
+    def positive_int(value, default):
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+
+    progress_interval = positive_int(logging_options.get("progress_interval"), 100)
+    verbose_limit = positive_int(logging_options.get("verbose_limit"), 120)
+    verbose_emitted = 0
+    last_progress_work = 0
+
+    def log_debug(message):
+        nonlocal verbose_emitted
+        if log_mode != "debug" or verbose_emitted >= verbose_limit:
+            return
+        verbose_emitted += 1
+        emit(event_callback, EVENT_LOG, f"      CDCL debug: {message}")
+
+    def log_progress(force=False):
+        nonlocal last_progress_work
+        if log_mode not in ("periodic", "debug"):
+            return
+
+        work = stats["decisions"] + stats["conflicts"] + stats["propagations"]
+        if not force and work - last_progress_work < progress_interval:
+            return
+
+        last_progress_work = work
+        emit(
+            event_callback,
+            EVENT_LOG,
+            (
+                "      CDCL progress: "
+                f"decisions={stats['decisions']}, "
+                f"conflicts={stats['conflicts']}, "
+                f"propagations={stats['propagations']}, "
+                f"learned={stats['learned_clauses']}"
+            ),
+        )
 
     def finish(solution, status):
         stats["status"] = status
@@ -90,8 +141,8 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
             return solution, stats
         return solution
 
-    if cancel_requested(cancel_token):
-        return finish(None, "CANCELLED")
+    if stop_requested(cancel_token):
+        return finish(None, cancellation_status(cancel_token))
 
     normalised, variables, max_var, has_empty_clause = _normalise_formula(clauses)
 
@@ -194,12 +245,14 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
         return clause
 
     for lits in normalised:
-        if cancel_requested(cancel_token):
-            return finish(None, "CANCELLED")
+        if stop_requested(cancel_token):
+            return finish(None, cancellation_status(cancel_token))
 
         clause = add_clause(lits)
-        if len(lits) == 1 and not enqueue(lits[0], clause):
-            return finish(None, "UNSAT")
+        if len(lits) == 1:
+            log_debug(f"unit clause forces {lits[0]}")
+            if not enqueue(lits[0], clause):
+                return finish(None, "UNSAT")
 
     def propagate():
         """
@@ -212,7 +265,7 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
         nonlocal qhead
 
         while qhead < len(trail):
-            if cancel_requested(cancel_token):
+            if stop_requested(cancel_token):
                 return cancelled
 
             false_lit = -trail[qhead]
@@ -222,7 +275,7 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
             i = 0
 
             while i < len(watch_list):
-                if cancel_requested(cancel_token):
+                if stop_requested(cancel_token):
                     return cancelled
 
                 clause = watch_list[i]
@@ -392,16 +445,18 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
         return best_var
 
     while True:
-        if cancel_requested(cancel_token):
-            return finish(None, "CANCELLED")
+        if stop_requested(cancel_token):
+            return finish(None, cancellation_status(cancel_token))
 
         conflict = propagate()
 
         if conflict is cancelled:
-            return finish(None, "CANCELLED")
+            return finish(None, cancellation_status(cancel_token))
 
         if conflict is not None:
             stats["conflicts"] += 1
+            log_debug(f"conflict {stats['conflicts']} at level {current_level()}")
+            log_progress()
 
             if current_level() == 0:
                 return finish(None, "UNSAT")
@@ -411,6 +466,7 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
 
             learnt_lits, backjump_level = analyse_conflict(conflict)
             decay_activity()
+            log_debug(f"learned clause size {len(learnt_lits)}; backjump to level {backjump_level}")
 
             if not learnt_lits:
                 return finish(None, "UNSAT")
@@ -444,6 +500,8 @@ def cdcl(clauses, max_conflicts=None, return_stats=False, event_callback=None, c
         else:
             value = saved_phase[decision_var]
 
+        log_debug(f"decision {stats['decisions']} at level {current_level()}: {decision_var}={value}")
+        log_progress()
         enqueue(decision_var if value else -decision_var, reason=None)
 
 
