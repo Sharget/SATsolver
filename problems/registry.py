@@ -1,4 +1,10 @@
 from problems.dimacs_problem import dimacs_problem_from_text
+from problems.clique import (
+    average_degree_clique_problem,
+    exact_edges_clique_problem,
+    manual_clique_problem,
+    random_clique_problem,
+)
 from problems.graph_coloring import (
     average_degree_graph_coloring_problem,
     exact_edges_graph_coloring_problem,
@@ -38,5 +44,9 @@ PROBLEM_TYPES = {
     "Independent Set Random": random_independent_set_problem,
     "Independent Set Exact Edges": exact_edges_independent_set_problem,
     "Independent Set Average Degree": average_degree_independent_set_problem,
+    "Clique Manual": manual_clique_problem,
+    "Clique Random": random_clique_problem,
+    "Clique Exact Edges": exact_edges_clique_problem,
+    "Clique Average Degree": average_degree_clique_problem,
     "DIMACS": dimacs_problem_from_text,
 }

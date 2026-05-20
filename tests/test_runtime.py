@@ -1,7 +1,9 @@
 import unittest
 
 from sat_core.benchmark import (
+    run_clique_sweep,
     run_graph_coloring_sweep,
+    run_graph_suite_sweep,
     run_hamiltonian_path_sweep,
     run_independent_set_sweep,
     run_n_queens_sweep,
@@ -126,11 +128,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(event.type == EVENT_ROW for event in events))
         self.assertTrue(any(event.type == EVENT_PROGRESS for event in events))
 
+    def test_clique_benchmark_emits_row_and_progress_events(self):
+        events = []
+
+        rows = run_clique_sweep([3], [1.0], [3], ["CDCL"], repeats=1, event_callback=events.append)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].problem_type, "Clique")
+        self.assertIn("k=3", rows[0].detail)
+        self.assertTrue(any(event.type == EVENT_ROW for event in events))
+        self.assertTrue(any(event.type == EVENT_PROGRESS for event in events))
+
+    def test_graph_suite_benchmark_emits_row_and_progress_events(self):
+        events = []
+
+        rows = run_graph_suite_sweep(
+            [3],
+            [1.0],
+            ["Clique", "Independent Set"],
+            ["CDCL"],
+            repeats=1,
+            target_sizes=[2],
+            event_callback=events.append,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row.problem_type for row in rows}, {"Clique", "Independent Set"})
+        self.assertEqual(len({row.problem_metadata["shared_graph_id"] for row in rows}), 1)
+        self.assertTrue(any(event.type == EVENT_ROW for event in events))
+        self.assertTrue(any(event.type == EVENT_PROGRESS for event in events))
+
     def test_new_benchmarks_validate_inputs(self):
         with self.assertRaises(ValueError):
             run_n_queens_sweep([0], ["CDCL"], repeats=1)
         with self.assertRaises(ValueError):
             run_independent_set_sweep([2], [0.0], [3], ["CDCL"], repeats=1)
+        with self.assertRaises(ValueError):
+            run_clique_sweep([2], [1.0], [3], ["CDCL"], repeats=1)
 
     def test_cancelled_n_queens_benchmark_before_start_returns_no_rows(self):
         events = []

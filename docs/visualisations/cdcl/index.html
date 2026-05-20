@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>CDCL SAT Visualizator — revamp</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --panel-soft: #f8fafc;
+    --border: #d8dde8;
+    --text: #182033;
+    --muted: #667085;
+    --blue-bg: #dbeafe;
+    --blue: #1d4ed8;
+    --red-bg: #fee2e2;
+    --red: #b91c1c;
+    --green-bg: #dcfce7;
+    --green: #15803d;
+    --yellow-bg: #fef3c7;
+    --yellow: #b45309;
+    --orange-bg: #ffedd5;
+    --orange: #c2410c;
+    --purple-bg: #ede9fe;
+    --purple: #7c3aed;
+    --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --shadow: 0 10px 25px rgba(15, 23, 42, .08);
+  }
+
+  html, body { height: 100%; }
+
+  body {
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    height: 66px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 2px 10px rgba(15,23,42,.04);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: .2px;
+  }
+
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    border-radius: 999px;
+    padding: 4px 9px;
+    background: var(--blue-bg);
+    color: var(--blue);
+    border: 1px solid rgba(29, 78, 216, .18);
+  }
+
+  .app {
+    height: calc(100vh - 66px - 34px);
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 310px minmax(0, 1fr);
+    grid-template-rows: 74px minmax(0, 1fr) 240px;
+  }
+
+  .sidebar {
+    grid-row: 1 / 4;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 14px 14px;
+    overflow: auto;
+  }
+
+  .topbar {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .step-box {
+    line-height: 1.45;
+    font-size: 13px;
+    min-width: 0;
+  }
+
+  .step-box strong { color: var(--blue); }
+  .step-box code {
+    font-family: var(--font-mono);
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    color: #1e40af;
+    padding: 1px 4px;
+    border-radius: 5px;
+  }
+
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(4, auto) auto;
+    gap: 7px;
+    align-items: center;
+    background: var(--panel-soft);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 7px;
+  }
+
+  button {
+    border: 1.5px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 9px;
+    font-family: var(--font-ui);
+    font-weight: 650;
+    font-size: 12px;
+    cursor: pointer;
+    transition: .15s ease;
+    white-space: nowrap;
+  }
+
+  button:hover:not(:disabled) {
+    background: #eef2ff;
+    border-color: #93c5fd;
+  }
+
+  button:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+
+  button.primary {
+    background: var(--blue);
+    color: white;
+    border-color: var(--blue);
+  }
+
+  button.primary:hover:not(:disabled) { background: #1e40af; }
+
+  button.danger {
+    color: var(--red);
+    border-color: #fecaca;
+  }
+
+  button.danger:hover:not(:disabled) {
+    background: var(--red-bg);
+    border-color: #fca5a5;
+  }
+
+  .step-counter {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding-left: 6px;
+    white-space: nowrap;
+  }
+
+  .main {
+    min-height: 0;
+    padding: 14px 16px;
+    overflow: auto;
+  }
+
+  .bottom {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    overflow: auto;
+  }
+
+  .section-title {
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: .8px;
+    font-weight: 700;
+    margin-bottom: 7px;
+  }
+
+  .side-block {
+    margin-top: 13px;
+    padding-top: 11px;
+    border-top: 1px solid var(--border);
+  }
+
+  .clauses, .compact-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .clause, .source-item, .trail-item {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: #fafafa;
+    border: 1.5px solid var(--border);
+    transition: .2s ease;
+  }
+
+  .clause.active, .source-item.active {
+    background: var(--yellow-bg);
+    border-color: #f59e0b;
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, .16);
+  }
+
+  .clause.conflict-clause, .source-item.conflict {
+    background: var(--red-bg);
+    border-color: #ef4444;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, .12);
+  }
+
+  .clause.sat-clause {
+    background: var(--green-bg);
+    border-color: #22c55e;
+  }
+
+  .clause.learned-clause, .source-item.learned {
+    background: var(--purple-bg);
+    border-color: #8b5cf6;
+    box-shadow: 0 0 0 4px rgba(139, 92, 246, .13);
+  }
+
+  .source-item .src-title {
+    font-weight: 800;
+    margin-bottom: 3px;
+  }
+
+  .source-item .src-text {
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  .explain-note {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 14px;
+    align-items: start;
+  }
+
+  .board {
+    min-width: 0;
+  }
+
+  .sources-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: 12px;
+    position: sticky;
+    top: 0;
+  }
+
+  .levels {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(160px, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+
+  .level-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    min-height: 330px;
+  }
+
+  .level-card.dimmed {
+    opacity: .5;
+    filter: grayscale(.25);
+  }
+
+  .level-header {
+    padding: 9px 12px;
+    background: var(--panel-soft);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
+  }
+
+  .level-header.active { color: var(--blue); background: var(--blue-bg); }
+  .level-header.conflict { color: var(--red); background: var(--red-bg); }
+  .level-header.learned { color: var(--purple); background: var(--purple-bg); }
+  .level-header.sat { color: var(--green); background: var(--green-bg); }
+
+  .level-body {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .assign {
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    padding: 9px 10px;
+    background: #fff;
+  }
+
+  .assign.active {
+    background: var(--yellow-bg);
+    border-color: #f59e0b;
+  }
+
+  .assign.forced {
+    background: var(--green-bg);
+    border-color: #22c55e;
+  }
+
+  .assign.conflict {
+    background: var(--red-bg);
+    border-color: #ef4444;
+  }
+
+  .assign.learned {
+    background: var(--purple-bg);
+    border-color: #8b5cf6;
+  }
+
+  .assign.sat {
+    background: var(--green-bg);
+    border-color: #22c55e;
+  }
+
+  .assign.removed {
+    opacity: .45;
+    text-decoration: line-through;
+  }
+
+  .assign-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .assign-note {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+
+  .arrow {
+    text-align: center;
+    font-size: 18px;
+    line-height: 1.1;
+    margin: -2px 0;
+  }
+
+  .arrow.logical { color: var(--green); }
+  .arrow.decision { color: var(--orange); }
+  .arrow.conflict { color: var(--red); }
+  .arrow.learned { color: var(--purple); }
+
+  .mini-label {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 800;
+  }
+
+  .mini-label.decision { background: var(--orange-bg); color: var(--orange); }
+  .mini-label.forced { background: var(--green-bg); color: var(--green); }
+  .mini-label.conflict { background: var(--red-bg); color: var(--red); }
+  .mini-label.learned { background: var(--purple-bg); color: var(--purple); }
+
+  .bottom-grid {
+    display: grid;
+    grid-template-columns: .85fr 1.15fr;
+    gap: 12px;
+  }
+
+  .bottom-card {
+    background: var(--panel-soft);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 9px 10px;
+    min-height: 170px;
+  }
+
+  .bottom-card.active {
+    border-color: #8b5cf6;
+    background: var(--purple-bg);
+  }
+
+  .bottom-title {
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    margin-bottom: 6px;
+  }
+
+  .chain {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+
+  .legend {
+    height: 34px;
+    display: flex;
+    gap: 13px;
+    align-items: center;
+    flex-wrap: nowrap;
+    padding: 6px 22px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .legend-dot {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+  }
+
+  .ld-blue { background: var(--blue-bg); border-color: var(--blue); }
+  .ld-red { background: var(--red-bg); border-color: var(--red); }
+  .ld-green { background: var(--green-bg); border-color: var(--green); }
+  .ld-purple { background: var(--purple-bg); border-color: var(--purple); }
+  .ld-orange { background: var(--orange-bg); border-color: var(--orange); }
+
+  @media (max-width: 1350px) {
+    .app { grid-template-columns: 280px minmax(0, 1fr); }
+    .workspace { grid-template-columns: minmax(0, 1fr) 260px; }
+    .levels { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+    .controls { grid-template-columns: repeat(2, auto) auto; }
+  }
+
+  @media (max-width: 1000px) {
+    body { overflow: auto; height: auto; }
+    .app {
+      height: auto;
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto auto auto;
+    }
+    .sidebar {
+      grid-row: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar {
+      grid-template-columns: 1fr;
+    }
+    .controls {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .workspace {
+      grid-template-columns: 1fr;
+    }
+    .sources-panel {
+      position: static;
+    }
+    .levels {
+      grid-template-columns: 1fr;
+    }
+    .bottom-grid {
+      grid-template-columns: 1fr;
+    }
+    .legend {
+      flex-wrap: wrap;
+      height: auto;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Vizualizator CDCL</h1>
+  <span class="tag">SAT / CNF</span>
+  <span class="tag" style="background:var(--purple-bg);color:var(--purple)">clause learning</span>
+  <span class="tag" style="background:var(--green-bg);color:var(--green)">demo educativ</span>
+</header>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="section-title">Formula CNF</div>
+    <div class="clauses" id="clause-list"></div>
+
+    <div class="side-block">
+      <div class="section-title">Trail compact</div>
+      <div class="compact-list" id="trail-compact"></div>
+    </div>
+
+    <div class="side-block">
+      <div class="section-title">Idee cheie</div>
+      <p class="explain-note">
+        Nivel nou apare doar la decizie. După backjump, exemplul arată că d=1 este permis; fără o clauză suplimentară nu există motiv să forțăm d=0.
+      </p>
+    </div>
+  </aside>
+
+  <section class="topbar">
+    <div class="step-box" id="step-desc">Apasă <strong>Pas următor</strong> pentru a începe demonstrația.</div>
+    <div class="controls">
+      <button id="btn-prev">← Pas anterior</button>
+      <button id="btn-next" class="primary">Pas următor →</button>
+      <button id="btn-auto">▶ Auto play</button>
+      <button id="btn-reset" class="danger">↺ Reset</button>
+      <span class="step-counter" id="step-counter">Pas 0 / 16</span>
+    </div>
+  </section>
+
+  <main class="main">
+    <div class="workspace">
+      <section class="board">
+        <div class="section-title">Niveluri CDCL / listă cu săgeți</div>
+        <div class="levels" id="levels"></div>
+      </section>
+
+      <aside class="sources-panel">
+        <div class="section-title">Surse propagări / conflict</div>
+        <div class="compact-list" id="source-list"></div>
+      </aside>
+    </div>
+  </main>
+
+  <section class="bottom">
+    <div class="section-title">De unde vine conflictul / rezoluția</div>
+    <div class="bottom-grid">
+      <div class="bottom-card">
+        <div class="bottom-title">Lanțul de cauze</div>
+        <div class="chain" id="cause-chain"></div>
+      </div>
+      <div class="bottom-card" id="resolution-card">
+        <div class="bottom-title">Rezoluție / explicație</div>
+        <div class="chain" id="resolution"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="legend">
+  <strong style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.7px">Legendă:</strong>
+  <span class="legend-item"><span class="legend-dot ld-blue"></span>decizie</span>
+  <span class="legend-item"><span class="legend-dot ld-green"></span>propagare forțată</span>
+  <span class="legend-item"><span class="legend-dot ld-orange"></span>nivel nou / decizie nouă</span>
+  <span class="legend-item"><span class="legend-dot ld-red"></span>conflict</span>
+  <span class="legend-item"><span class="legend-dot ld-purple"></span>clauză învățată</span>
+</div>
+
+<script>
+const CLAUSES = [
+  { id:"C1", label:"(¬a ∨ c)", reason:"dacă a=1, atunci c=1" },
+  { id:"C2", label:"(f ∨ g)", reason:"nivel separat; dacă f=1, clauza este satisfăcută" },
+  { id:"C3", label:"(¬b ∨ d)", reason:"dacă b=1, atunci d=1" },
+  { id:"C4", label:"(¬c ∨ ¬d ∨ e)", reason:"dacă c=1 și d=1, atunci e=1" },
+  { id:"C5", label:"(¬b ∨ ¬e)", reason:"b și e nu pot fi ambele 1" },
+  { id:"L", label:"(¬b ∨ ¬c)", reason:"clauză învățată: b și c nu pot fi ambele 1", learned:true },
+];
+
+const BASE_LEVELS = [
+  { title:"Nivel 1", subtitle:"decizie: a=1", key:"L1" },
+  { title:"Nivel 2", subtitle:"decizie separată: f=1", key:"L2" },
+  { title:"Nivel 3", subtitle:"decizie: b=1", key:"L3" },
+  { title:"După backjump", subtitle:"revenire la nivelul 1", key:"BJ" },
+];
+
+const STEP_DATA = [
+  {
+    desc:"Formula este în forma CNF. Exemplul este construit special pentru CDCL: decizie, propagare, conflict, rezoluție, clauză învățată și backjump.",
+    clauses:{}, activeLevel:null,
+    levels:{ L1:[], L2:[], L3:[], BJ:[] },
+    sources:[],
+    chain:["Demonstrația începe fără atribuiri."],
+    resolution:["Rezoluția apare după conflict."]
+  },
+  {
+    desc:"Se creează <strong>Nivelul 1</strong> deoarece solverul face o decizie: <code>a=1</code>.",
+    clauses:{}, activeLevel:"L1",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie nouă → creează nivelul 1"}], L2:[], L3:[], BJ:[] },
+    sources:[],
+    chain:["Nivel nou apare doar la decizie.", "a=1 este decizie, nu propagare."],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"C1 devine unitară: <code>(¬a ∨ c)</code>. Deoarece <code>a=1</code>, <code>¬a=false</code>, deci se forțează <code>c=1</code>.",
+    clauses:{C1:"active"}, activeLevel:"L1",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[], L3:[], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c). Pentru că a=1, ¬a=false, deci c trebuie să fie 1."}],
+    chain:["a=1", "C1: (¬a ∨ c)", "⇒ c=1"],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"Se creează <strong>Nivelul 2</strong> deoarece solverul face o nouă decizie: <code>f=1</code>. Aceasta nu este forțată de c=1; este doar următoarea alegere a solverului.",
+    clauses:{C2:"active"}, activeLevel:"L2",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie nouă → nivelul 2"}], L3:[], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c)."}],
+    chain:["Nivelul 2 nu vine din c=1.", "Nivelul 2 vine din decizia f=1.", "C2 este satisfăcută prin f=1."],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"Se creează <strong>Nivelul 3</strong> deoarece solverul face altă decizie: <code>b=1</code>. Aceasta este o alegere nouă, nu o consecință a lui f=1 sau c=1.",
+    clauses:{}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"decision", note:"decizie nouă → nivelul 3"}], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c)."}],
+    chain:["Decizie nouă: b=1", "⇒ se creează nivelul 3"],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"C3 devine unitară: <code>(¬b ∨ d)</code>. Deoarece <code>b=1</code>, <code>¬b=false</code>, deci se forțează <code>d=1</code>.",
+    clauses:{C3:"active"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"d=1", k:"forced", note:"forțat de C3"}], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c)."}, {t:"d=1 ← C3", k:"active", d:"C3: (¬b ∨ d). Pentru că b=1, ¬b=false, deci d=1."}],
+    chain:["b=1", "C3: (¬b ∨ d)", "⇒ d=1"],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"C4 devine unitară: <code>(¬c ∨ ¬d ∨ e)</code>. Avem <code>c=1</code> și <code>d=1</code>, deci <code>e=1</code> este forțat.",
+    clauses:{C4:"active"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"d=1", k:"forced", note:"forțat de C3"}, {arrow:"logical"}, {t:"e=1", k:"forced", note:"forțat de C4: c=1 și d=1"}], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c)."}, {t:"d=1 ← C3", k:"active", d:"C3: (¬b ∨ d)."}, {t:"e=1 ← C4", k:"active", d:"C4: (¬c ∨ ¬d ∨ e). Pentru că c=1 și d=1, rămâne e=1."}],
+    chain:["c=1 și d=1", "C4: (¬c ∨ ¬d ∨ e)", "⇒ e=1"],
+    resolution:["Nu există conflict încă."]
+  },
+  {
+    desc:"Apare conflictul în C5: <code>(¬b ∨ ¬e)</code>. Avem <code>b=1</code> și <code>e=1</code>, deci ambele literale din C5 sunt false.",
+    clauses:{C5:"conflict"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"conflict", note:"face ¬b=false în C5"}, {arrow:"logical"}, {t:"d=1", k:"forced", note:"forțat de C3"}, {arrow:"logical"}, {t:"e=1", k:"conflict", note:"face ¬e=false în C5"}, {arrow:"conflict"}, {t:"Conflict", k:"conflict", note:"C5 este falsă"}], BJ:[] },
+    sources:[{t:"c=1 ← C1", k:"active", d:"C1: (¬a ∨ c)."}, {t:"d=1 ← C3", k:"active", d:"C3: (¬b ∨ d)."}, {t:"e=1 ← C4", k:"active", d:"C4: (¬c ∨ ¬d ∨ e)."}, {t:"Conflict ← C5", k:"conflict", d:"C5: (¬b ∨ ¬e). b=1 și e=1 fac ¬b=false și ¬e=false."}],
+    chain:["b=1 și e=1", "C5: (¬b ∨ ¬e)", "¬b=false și ¬e=false", "⇒ conflict"],
+    resolution:["Conflict clause:", "C5: (¬b ∨ ¬e)"]
+  },
+  {
+    desc:"Începem conflict analysis. Rezolvăm pe <code>e</code>, deoarece conflictul are <code>¬e</code>, iar motivul pentru <code>e=1</code> este C4, care conține <code>e</code>.",
+    clauses:{C4:"active", C5:"conflict"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"conflict", note:"în conflict"}, {arrow:"logical"}, {t:"d=1", k:"forced", note:"forțat de C3"}, {arrow:"logical"}, {t:"e=1", k:"conflict", note:"motiv: C4"}, {arrow:"conflict"}, {t:"Conflict", k:"conflict", note:"C5"}], BJ:[] },
+    sources:[{t:"e=1 ← C4", k:"active", d:"Folosim C4 ca motiv pentru e=1."}, {t:"Conflict ← C5", k:"conflict", d:"Folosim C5 ca punct de pornire."}],
+    chain:["Conflictul conține ¬e.", "Motivul lui e=1 este C4.", "Rezolvăm C5 cu C4 pe e."],
+    resolution:["C5: (¬b ∨ ¬e)", "C4: (¬c ∨ ¬d ∨ e)", "eliminăm: ¬e și e", "R1: (¬b ∨ ¬c ∨ ¬d)"]
+  },
+  {
+    desc:"Rezolvăm pe <code>d</code>, deoarece R1 are <code>¬d</code>, iar motivul pentru <code>d=1</code> este C3, care conține <code>d</code>. Obținem clauza învățată L.",
+    clauses:{C3:"active", L:"learned"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}], L2:[{t:"f=1", k:"decision", note:"decizie"}], L3:[{t:"b=1", k:"conflict", note:"literal curent"}, {arrow:"logical"}, {t:"d=1", k:"conflict", note:"motiv: C3"}, {arrow:"logical"}, {t:"e=1", k:"forced", note:"motiv: C4"}], BJ:[{t:"L=(¬b ∨ ¬c)", k:"learned", note:"clauză învățată"}] },
+    sources:[{t:"d=1 ← C3", k:"active", d:"Folosim C3 ca motiv pentru d=1."}, {t:"L ← rezoluție", k:"learned", d:"După rezoluție obținem L=(¬b ∨ ¬c)."}],
+    chain:["R1 conține ¬d.", "Motivul lui d=1 este C3.", "Rezolvăm R1 cu C3 pe d."],
+    resolution:["R1: (¬b ∨ ¬c ∨ ¬d)", "C3: (¬b ∨ d)", "eliminăm: ¬d și d", "L: (¬b ∨ ¬c)"]
+  },
+  {
+    desc:"L are un singur literal din nivelul curent: <code>¬b</code>. Variabila <code>b</code> era la nivelul 3, iar <code>c</code> era la nivelul 1. De aceea <code>¬b</code> este asserting literal.",
+    clauses:{L:"learned"}, activeLevel:"BJ",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"decizie"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"nivel 1"}], L2:[{t:"f=1", k:"decision", note:"nivel 2, irelevant"}], L3:[{t:"b=1", k:"conflict", note:"nivel 3"}, {t:"d=1", k:"forced", note:"nivel 3"}, {t:"e=1", k:"forced", note:"nivel 3"}], BJ:[{t:"L=(¬b ∨ ¬c)", k:"learned", note:"¬b nivel 3, ¬c nivel 1"}] },
+    sources:[{t:"L=(¬b ∨ ¬c)", k:"learned", d:"¬b este literalul din nivelul curent; ¬c este din nivelul 1."}],
+    chain:["level(b)=3", "level(c)=1", "L are un singur literal din nivelul curent: ¬b"],
+    resolution:["L: (¬b ∨ ¬c)", "asserting literal: ¬b", "backjump level: 1"]
+  },
+  {
+    desc:"CDCL face backjump de la nivelul 3 direct la nivelul 1. Nivelul 2 este șters fiindcă nu apare în clauza învățată.",
+    clauses:{L:"learned"}, activeLevel:"BJ",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"rămâne"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"rămâne"}], L2:[{t:"f=1", k:"removed", note:"șters la backjump"}], L3:[{t:"b=1", k:"removed", note:"șters"}, {t:"d=1", k:"removed", note:"șters"}, {t:"e=1", k:"removed", note:"șters"}], BJ:[{t:"jump 3→1", k:"learned", note:"nivelul 2 este sărit"}] },
+    sources:[{t:"Backjump ← L", k:"learned", d:"L conține ¬c din nivelul 1, deci se sare la nivelul 1."}],
+    chain:["L: (¬b ∨ ¬c)", "celălalt literal este ¬c", "c este la nivelul 1", "⇒ jump 3 → 1"],
+    resolution:["După backjump rămâne c=1.", "Nivelul 2 este irelevant pentru conflict."]
+  },
+  {
+    desc:"După backjump, L devine unitară. Avem încă <code>c=1</code>, deci <code>¬c=false</code>. Rămâne <code>¬b</code>, deci se forțează <code>b=0</code>.",
+    clauses:{L:"learned"}, activeLevel:"BJ",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"rămâne"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"rămâne"}, {arrow:"learned"}, {t:"b=0", k:"learned", note:"forțat de L"}], L2:[], L3:[], BJ:[{t:"L devine unit", k:"learned", note:"(¬b ∨ false)"}] },
+    sources:[{t:"b=0 ← L", k:"learned", d:"L: (¬b ∨ ¬c). c=1 face ¬c=false, deci se forțează b=0."}],
+    chain:["c=1", "L: (¬b ∨ ¬c)", "¬c=false", "⇒ b=0"],
+    resolution:["L: (¬b ∨ ¬c)", "c=1 ⇒ ¬c=false", "L devine: (¬b)", "forțează b=0"]
+  },
+  {
+    desc:"După backjump, <code>b=0</code> este forțat de clauza învățată L. Acum C3 și C5 sunt deja satisfăcute, deoarece <code>¬b=true</code>. Mai rămân de închis C2 și C4.",
+    clauses:{C3:"sat", C5:"sat", L:"learned"}, activeLevel:"BJ",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"rămâne"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}, {arrow:"learned"}, {t:"b=0", k:"learned", note:"forțat de L"}], L2:[], L3:[], BJ:[{t:"C3 și C5 OK", k:"sat", note:"¬b=true"}] },
+    sources:[{t:"C3 satisfăcută", k:"learned", d:"C3: (¬b ∨ d). Deoarece b=0, ¬b=true."}, {t:"C5 satisfăcută", k:"learned", d:"C5: (¬b ∨ ¬e). Deoarece b=0, ¬b=true."}],
+    chain:["După backjump: a=1, c=1, b=0.", "C3 și C5 nu mai pot produce conflict.", "Mai trebuie satisfăcute C2 și C4."],
+    resolution:["Partea importantă CDCL s-a terminat: L a blocat combinația b=1 și c=1."]
+  },
+  {
+    desc:"Solverul face o decizie simplă pentru C2: alege <code>f=1</code>. Aceasta nu este propagare; este doar o alegere care satisface <code>C2=(f ∨ g)</code>.",
+    clauses:{C2:"sat", C3:"sat", C5:"sat", L:"learned"}, activeLevel:"L2",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"rămâne"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}, {arrow:"learned"}, {t:"b=0", k:"learned", note:"forțat de L"}], L2:[{t:"f=1", k:"decision", note:"decizie pentru C2"}], L3:[], BJ:[] },
+    sources:[{t:"C2 satisfăcută", k:"active", d:"C2: (f ∨ g). Alegem f=1."}],
+    chain:["C2: (f ∨ g)", "alegem f=1", "⇒ C2 este satisfăcută"],
+    resolution:["f=1 este decizie, nu rezultat din conflict."]
+  },
+  {
+    desc:"Acum, ca să nu mai pară că <code>d=0</code> a fost ales arbitrar, solverul încearcă <code>d=1</code>. Cu <code>c=1</code>, C4 devine <code>(¬d ∨ e)</code>, deci <code>d=1</code> forțează <code>e=1</code>.",
+    clauses:{C2:"sat", C4:"active", C3:"sat", C5:"sat", L:"learned"}, activeLevel:"L3",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"rămâne"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}, {arrow:"learned"}, {t:"b=0", k:"learned", note:"forțat de L"}], L2:[{t:"f=1", k:"decision", note:"decizie pentru C2"}], L3:[{t:"d=1", k:"decision", note:"încercare permisă"}, {arrow:"logical"}, {t:"e=1", k:"forced", note:"forțat de C4"}], BJ:[] },
+    sources:[{t:"e=1 ← C4", k:"active", d:"C4: (¬c ∨ ¬d ∨ e). Cu c=1 și d=1, rămâne e=1."}],
+    chain:["c=1 și d=1", "C4: (¬c ∨ ¬d ∨ e)", "⇒ e=1"],
+    resolution:["Nu apare conflict, deoarece C5 este deja satisfăcută de b=0."]
+  },
+  {
+    desc:"Formula este SAT. Observă diferența: fără o clauză suplimentară de tip <code>(¬e)</code>, solverul nu are motiv să concluzioneze că <code>d</code> trebuie să fie 0. Varianta <code>d=1, e=1</code> este validă.",
+    clauses:{C1:"sat", C2:"sat", C3:"sat", C4:"sat", C5:"sat", L:"learned"}, activeLevel:"BJ",
+    levels:{ L1:[{t:"a=1", k:"decision", note:"satisface C1 prin c"}, {arrow:"logical"}, {t:"c=1", k:"forced", note:"forțat de C1"}, {arrow:"learned"}, {t:"b=0", k:"learned", note:"forțat de L"}], L2:[{t:"f=1", k:"decision", note:"satisface C2"}], L3:[{t:"d=1", k:"decision", note:"ales după backjump"}, {arrow:"logical"}, {t:"e=1", k:"forced", note:"forțat de C4"}], BJ:[{t:"SAT", k:"sat", note:"toate clauzele sunt satisfăcute"}] },
+    sources:[{t:"C4 satisfăcută", k:"active", d:"e=1 satisface C4."}, {t:"C5 satisfăcută", k:"learned", d:"b=0 face ¬b=true, deci C5 este satisfăcută indiferent de e."}],
+    chain:["a=1, c=1, b=0, f=1, d=1, e=1", "toate clauzele sunt satisfăcute"],
+    resolution:["Formula este SAT.", "d=0 nu este obligatoriu în această formulă; d=1 funcționează."]
+  },
+];
+
+let currentStep = 0;
+let autoTimer = null;
+const TOTAL = STEP_DATA.length - 1;
+
+function buildClauseList() {
+  const list = document.getElementById("clause-list");
+  list.innerHTML = "";
+  CLAUSES.forEach((cl) => {
+    const div = document.createElement("div");
+    div.className = "clause";
+    div.id = `clause-${cl.id}`;
+    div.innerHTML = `<strong>${cl.id}</strong> ${cl.label}`;
+    div.title = cl.reason;
+    list.appendChild(div);
+  });
+}
+
+function renderClauses(step) {
+  CLAUSES.forEach(cl => {
+    const el = document.getElementById(`clause-${cl.id}`);
+    el.className = "clause";
+    if (cl.learned && !step.clauses.L) {
+      el.style.display = "none";
+      return;
+    }
+    el.style.display = "";
+    const state = step.clauses[cl.id];
+    if (state === "active") el.classList.add("active");
+    if (state === "conflict") el.classList.add("conflict-clause");
+    if (state === "learned") el.classList.add("learned-clause");
+    if (state === "sat") el.classList.add("sat-clause");
+  });
+}
+
+function renderLevels(step) {
+  const root = document.getElementById("levels");
+  root.innerHTML = "";
+
+  BASE_LEVELS.forEach(level => {
+    const card = document.createElement("div");
+    const items = step.levels[level.key] || [];
+    const isEmpty = !items.length;
+    card.className = "level-card" + (isEmpty ? " dimmed" : "");
+
+    let headerClass = "";
+    if (step.activeLevel === level.key) headerClass = "active";
+    if (items.some(i => i.k === "conflict")) headerClass = "conflict";
+    if (items.some(i => i.k === "learned")) headerClass = "learned";
+    if (items.some(i => i.k === "sat")) headerClass = "sat";
+
+    const body = items.length ? items.map(item => {
+      if (item.arrow) {
+        const label = item.arrow === "logical" ? "↓ propagare" :
+          item.arrow === "decision" ? "↓ decizie nouă" :
+          item.arrow === "conflict" ? "↓ conflict" :
+          "↓ clauză învățată";
+        return `<div class="arrow ${item.arrow}">${label}</div>`;
+      }
+      const labelClass = item.k === "decision" ? "decision" :
+        item.k === "forced" ? "forced" :
+        item.k === "conflict" ? "conflict" :
+        item.k === "learned" ? "learned" :
+        item.k === "sat" ? "forced" : "decision";
+      const cls = item.k === "removed" ? "assign removed" : `assign ${labelClass}`;
+      const badge = item.k === "decision" ? "decizie" :
+        item.k === "forced" ? "forced" :
+        item.k === "conflict" ? "conflict" :
+        item.k === "learned" ? "learned" :
+        item.k === "sat" ? "SAT" : "șters";
+      return `<div class="${cls}">
+        <div class="assign-title"><span>${item.t}</span><span class="mini-label ${labelClass}">${badge}</span></div>
+        <div class="assign-note">${item.note || ""}</div>
+      </div>`;
+    }).join("") : `<div class="assign"><div class="assign-note">Nu există atribuiri aici în acest pas.</div></div>`;
+
+    card.innerHTML = `
+      <div class="level-header ${headerClass}">
+        ${level.title}<br><span style="font-weight:600;text-transform:none;letter-spacing:0;color:var(--muted)">${level.subtitle}</span>
+      </div>
+      <div class="level-body">${body}</div>
+    `;
+    root.appendChild(card);
+  });
+}
+
+function renderTrailCompact(step) {
+  const root = document.getElementById("trail-compact");
+  const lines = [];
+  BASE_LEVELS.forEach(level => {
+    const items = (step.levels[level.key] || []).filter(i => !i.arrow && i.k !== "removed");
+    if (!items.length) return;
+    const text = items.map(i => i.t).join(", ");
+    lines.push(`<div class="trail-item"><strong>${level.title}</strong>: ${text}</div>`);
+  });
+  root.innerHTML = lines.length ? lines.join("") : `<div class="trail-item">Trail gol.</div>`;
+}
+
+function renderSources(step) {
+  const root = document.getElementById("source-list");
+  if (!step.sources.length) {
+    root.innerHTML = `<div class="source-item"><div class="src-title">Nu există încă propagări.</div><div class="src-text">Sursele apar când o clauză forțează o atribuire sau produce conflict.</div></div>`;
+    return;
+  }
+  root.innerHTML = step.sources.map(src => `<div class="source-item ${src.k || ""}">
+    <div class="src-title">${src.t}</div>
+    <div class="src-text">${src.d}</div>
+  </div>`).join("");
+}
+
+function renderBottom(step) {
+  document.getElementById("cause-chain").innerHTML = step.chain.map(x => `<div>${x}</div>`).join("");
+  document.getElementById("resolution").innerHTML = step.resolution.map(x => `<div>${x}</div>`).join("");
+  const card = document.getElementById("resolution-card");
+  if (step.resolution.some(x => x.includes("L:") || x.includes("R1") || x.includes("eliminăm"))) card.classList.add("active");
+  else card.classList.remove("active");
+}
+
+function renderStep(index) {
+  const step = STEP_DATA[index];
+  document.getElementById("step-desc").innerHTML = step.desc;
+  document.getElementById("step-counter").textContent = `Pas ${index} / ${TOTAL}`;
+  renderClauses(step);
+  renderLevels(step);
+  renderTrailCompact(step);
+  renderSources(step);
+  renderBottom(step);
+
+  document.getElementById("btn-prev").disabled = index === 0;
+  document.getElementById("btn-next").disabled = index === TOTAL;
+}
+
+function stopAuto() {
+  if (autoTimer) clearInterval(autoTimer);
+  autoTimer = null;
+  document.getElementById("btn-auto").textContent = "▶ Auto play";
+}
+
+document.getElementById("btn-next").addEventListener("click", () => {
+  if (currentStep < TOTAL) {
+    currentStep++;
+    renderStep(currentStep);
+  }
+});
+
+document.getElementById("btn-prev").addEventListener("click", () => {
+  if (currentStep > 0) {
+    currentStep--;
+    renderStep(currentStep);
+  }
+});
+
+document.getElementById("btn-reset").addEventListener("click", () => {
+  stopAuto();
+  currentStep = 0;
+  renderStep(currentStep);
+});
+
+document.getElementById("btn-auto").addEventListener("click", () => {
+  if (autoTimer) {
+    stopAuto();
+    return;
+  }
+  document.getElementById("btn-auto").textContent = "⏸ Stop auto";
+  autoTimer = setInterval(() => {
+    if (currentStep < TOTAL) {
+      currentStep++;
+      renderStep(currentStep);
+    } else {
+      stopAuto();
+    }
+  }, 2100);
+});
+
+buildClauseList();
+renderStep(0);
+</script>
+</body>
+</html>

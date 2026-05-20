@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from problems.clique import (
+    average_degree_clique_problem,
+    exact_edges_clique_problem,
+    manual_clique_problem,
+    random_clique_problem,
+)
 from problems.dimacs_problem import dimacs_problem_from_text
 from problems.graph_coloring import (
     average_degree_graph_coloring_problem,
@@ -23,7 +29,9 @@ from problems.n_queens import n_queens_problem
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem
 from sat_core.benchmark import (
+    run_clique_sweep,
     run_graph_coloring_sweep,
+    run_graph_suite_sweep,
     run_hamiltonian_path_sweep,
     run_independent_set_sweep,
     run_n_queens_sweep,
@@ -61,6 +69,7 @@ def problem_from_snapshot(snapshot: dict) -> ProblemInstance:
             seed=snapshot["seed"],
             planted=snapshot.get("planted", True),
             formula_mode=snapshot.get("formula_mode"),
+            sat_percentage=snapshot.get("sat_percentage"),
         )
 
     if kind == "Graph Coloring":
@@ -108,6 +117,15 @@ def problem_from_snapshot(snapshot: dict) -> ProblemInstance:
             return average_degree_independent_set_problem(snapshot["nodes"], snapshot["average_degree"], snapshot["target"], seed=snapshot["seed"])
         return manual_independent_set_problem(snapshot["nodes"], snapshot["target"], snapshot["edge_text"])
 
+    if kind == "Clique":
+        if snapshot["mode"] == "Probability":
+            return random_clique_problem(snapshot["nodes"], snapshot["probability"], snapshot["target"], seed=snapshot["seed"])
+        if snapshot["mode"] == "Exact edges":
+            return exact_edges_clique_problem(snapshot["nodes"], snapshot["edge_count"], snapshot["target"], seed=snapshot["seed"])
+        if snapshot["mode"] == "Average degree":
+            return average_degree_clique_problem(snapshot["nodes"], snapshot["average_degree"], snapshot["target"], seed=snapshot["seed"])
+        return manual_clique_problem(snapshot["nodes"], snapshot["target"], snapshot["edge_text"])
+
     return dimacs_problem_from_text(
         snapshot["text"],
         problem_type=snapshot.get("loaded_problem_type", "DIMACS"),
@@ -129,9 +147,10 @@ def _problem_summary(problem: ProblemInstance) -> str:
             f"{base}, variables {problem.metadata.get('variables')}, "
             f"clauses {problem.metadata.get('clauses_requested')}, "
             f"ratio {problem.metadata.get('ratio'):.2f}, "
-            f"mode {problem.metadata.get('mode')}"
+            f"mode {problem.metadata.get('mode')}, "
+            f"selected {problem.metadata.get('selected_mode')}"
         )
-    if problem.problem_type == "Independent Set":
+    if problem.problem_type in ("Independent Set", "Clique"):
         return f"{base}, target k {problem.metadata.get('target')}, edges {problem.metadata.get('edges')}"
     if problem.problem_type not in ("Graph Coloring", "Hamiltonian Path"):
         return base
@@ -254,6 +273,7 @@ def benchmark_process(params: dict, skip_event, event_queue, cancel_event) -> No
             seed=params.get("seed"),
             planted=params.get("planted", True),
             formula_mode=params.get("formula_mode"),
+            sat_percentage=params.get("sat_percentage"),
             event_callback=lambda event: _emit(event_queue, event),
             cancel_token=token,
             logging_options=params.get("logging_options"),
@@ -282,6 +302,40 @@ def benchmark_process(params: dict, skip_event, event_queue, cancel_event) -> No
             params["solvers"],
             params["repeats"],
             seed=params["seed"],
+            edge_counts=params.get("edge_counts"),
+            generation_mode=params.get("generation_mode", "probability"),
+            event_callback=lambda event: _emit(event_queue, event),
+            cancel_token=token,
+            average_degrees=params.get("average_degrees"),
+            logging_options=params.get("logging_options"),
+            timeout_seconds=params.get("timeout_seconds"),
+        )
+    elif params.get("problem_type") == "Clique":
+        run_clique_sweep(
+            params["node_counts"],
+            params["probabilities"],
+            params["target_sizes"],
+            params["solvers"],
+            params["repeats"],
+            seed=params["seed"],
+            edge_counts=params.get("edge_counts"),
+            generation_mode=params.get("generation_mode", "probability"),
+            event_callback=lambda event: _emit(event_queue, event),
+            cancel_token=token,
+            average_degrees=params.get("average_degrees"),
+            logging_options=params.get("logging_options"),
+            timeout_seconds=params.get("timeout_seconds"),
+        )
+    elif params.get("problem_type") == "Graph Suite":
+        run_graph_suite_sweep(
+            params["node_counts"],
+            params["probabilities"],
+            params["suite_problems"],
+            params["solvers"],
+            params["repeats"],
+            seed=params["seed"],
+            target_sizes=params.get("target_sizes"),
+            color_counts=params.get("color_counts"),
             edge_counts=params.get("edge_counts"),
             generation_mode=params.get("generation_mode", "probability"),
             event_callback=lambda event: _emit(event_queue, event),

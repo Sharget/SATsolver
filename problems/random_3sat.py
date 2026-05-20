@@ -48,6 +48,7 @@ def random_3sat_problem(
     seed: int | None = None,
     planted: bool = True,
     formula_mode: str | None = None,
+    sat_percentage: float | None = None,
 ) -> ProblemInstance:
     if variable_count < 3:
         raise ValueError("Random 3-SAT needs at least 3 variables")
@@ -60,22 +61,33 @@ def random_3sat_problem(
         raise ValueError(f"Unknown Random 3-SAT mode: {formula_mode}")
     if formula_mode == "Forced UNSAT" and clause_count < 8:
         raise ValueError("Forced UNSAT Random 3-SAT needs at least 8 clauses")
+    if sat_percentage is not None and (sat_percentage < 0 or sat_percentage > 100):
+        raise ValueError("Random 3-SAT SAT target must be between 0 and 100")
+    if formula_mode == "Random" and sat_percentage is not None and sat_percentage < 100 and clause_count < 8:
+        raise ValueError("Random 3-SAT SAT/UNSAT mix needs at least 8 clauses")
 
     rng = random.Random(seed) if seed is not None else random
+    selected_mode = formula_mode
+    random_sat_percentage = sat_percentage
+    if formula_mode == "Random":
+        if sat_percentage is not None:
+            random_sat_percentage = float(sat_percentage)
+            selected_mode = "Planted SAT" if rng.random() < random_sat_percentage / 100 else "Forced UNSAT"
+
     planted_assignment = {
         variable: rng.choice((False, True))
         for variable in range(1, variable_count + 1)
     }
     clauses = []
 
-    if formula_mode == "Forced UNSAT":
+    if selected_mode == "Forced UNSAT":
         core_variables = rng.sample(range(1, variable_count + 1), 3)
         clauses.extend(_forced_unsat_core(core_variables))
 
     while len(clauses) < clause_count:
         while True:
             clause = _random_clause(rng, variable_count)
-            if formula_mode != "Planted SAT" or _clause_is_satisfied(clause, planted_assignment):
+            if selected_mode != "Planted SAT" or _clause_is_satisfied(clause, planted_assignment):
                 clauses.append(clause)
                 break
 
@@ -87,6 +99,8 @@ def random_3sat_problem(
         "Random": "random",
     }[formula_mode]
     name += f"_{mode_suffix}"
+    if formula_mode == "Random" and random_sat_percentage is not None:
+        name += f"_sat{random_sat_percentage:g}_{selected_mode.lower().replace(' ', '_')}"
 
     return ProblemInstance(
         name=name,
@@ -99,8 +113,11 @@ def random_3sat_problem(
             "ratio": ratio,
             "seed": seed,
             "mode": formula_mode,
-            "planted": formula_mode == "Planted SAT",
-            "forced_unsat": formula_mode == "Forced UNSAT",
+            "selected_mode": selected_mode,
+            "sat_percentage": random_sat_percentage,
+            "unsat_percentage": None if random_sat_percentage is None else 100 - random_sat_percentage,
+            "planted": selected_mode == "Planted SAT",
+            "forced_unsat": selected_mode == "Forced UNSAT",
         },
         decoder=_decode_assignment,
     )

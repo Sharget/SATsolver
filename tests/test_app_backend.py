@@ -4,6 +4,13 @@ import tkinter as tk
 import random
 
 from app import BENCHMARK_PROBLEMS, PROBLEM_KINDS, SATApp, SUDOKU_SIZES
+from problems.clique import (
+    average_degree_clique_problem,
+    clique_var,
+    exact_edges_clique_problem,
+    manual_clique_problem,
+    random_clique_problem,
+)
 from problems.dimacs_problem import dimacs_problem_from_text
 from problems.graph_coloring import (
     average_degree_graph_coloring_problem,
@@ -18,9 +25,10 @@ from problems.independent_set import independent_var, manual_independent_set_pro
 from problems.n_queens import n_queens_problem, n_queens_var
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
-from sat_core.benchmark import graph_coloring_sweep, result_to_row, run_random_3sat_sweep
+from sat_core.benchmark import graph_coloring_sweep, result_to_row, run_clique_sweep, run_graph_suite_sweep, run_random_3sat_sweep
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
 from sat_core.models import BenchmarkRow, ProblemInstance, SolveResult
+from sat_core.process_workers import problem_from_snapshot
 from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_ROW, RunEvent, RunToken
 from sat_core.solver_runner import SOLVERS, solve_problem
 from utils.general_utils import color_var, sudoku_var
@@ -110,6 +118,39 @@ class AppBackendTests(unittest.TestCase):
         self.assertTrue(all(len(clause) == 3 for clause in problem.clauses))
         self.assertEqual(solve_problem(problem, "CDCL").status, "UNSAT")
 
+    def test_random_3sat_random_mode_can_force_sat_mix(self):
+        problem = random_3sat_problem(6, 12, seed=4, formula_mode="Random", sat_percentage=100)
+
+        self.assertEqual(problem.metadata["mode"], "Random")
+        self.assertEqual(problem.metadata["selected_mode"], "Planted SAT")
+        self.assertEqual(problem.metadata["sat_percentage"], 100.0)
+        self.assertEqual(problem.metadata["unsat_percentage"], 0.0)
+        self.assertTrue(problem.metadata["planted"])
+        self.assertEqual(solve_problem(problem, "CDCL").status, "SAT")
+
+    def test_random_3sat_random_mode_can_force_unsat_mix(self):
+        problem = random_3sat_problem(6, 12, seed=4, formula_mode="Random", sat_percentage=0)
+
+        self.assertEqual(problem.metadata["mode"], "Random")
+        self.assertEqual(problem.metadata["selected_mode"], "Forced UNSAT")
+        self.assertEqual(problem.metadata["sat_percentage"], 0.0)
+        self.assertEqual(problem.metadata["unsat_percentage"], 100.0)
+        self.assertTrue(problem.metadata["forced_unsat"])
+        self.assertEqual(solve_problem(problem, "CDCL").status, "UNSAT")
+
+    def test_random_3sat_random_mode_keeps_pure_random_when_target_is_blank(self):
+        problem = random_3sat_problem(6, 12, seed=4, formula_mode="Random", sat_percentage=None)
+
+        self.assertEqual(problem.metadata["mode"], "Random")
+        self.assertEqual(problem.metadata["selected_mode"], "Random")
+        self.assertIsNone(problem.metadata["sat_percentage"])
+        self.assertFalse(problem.metadata["planted"])
+        self.assertFalse(problem.metadata["forced_unsat"])
+
+    def test_random_3sat_sat_mix_percentage_is_validated(self):
+        with self.assertRaises(ValueError):
+            random_3sat_problem(6, 12, seed=4, formula_mode="Random", sat_percentage=101)
+
     def test_hamiltonian_path_problem_sat_and_unsat(self):
         sat_problem = manual_hamiltonian_path_problem(3, "1-2, 2-3")
         unsat_problem = manual_hamiltonian_path_problem(3, "1-2")
@@ -125,6 +166,69 @@ class AppBackendTests(unittest.TestCase):
         self.assertIn([independent_var(1, 1, 3), independent_var(1, 2, 3), independent_var(1, 3, 3)], sat_problem.clauses)
         self.assertEqual(solve_problem(sat_problem, "CDCL").status, "SAT")
         self.assertEqual(solve_problem(unsat_problem, "CDCL").status, "UNSAT")
+
+    def test_clique_problem_sat_and_unsat(self):
+        sat_problem = manual_clique_problem(3, 3, "1-2, 1-3, 2-3")
+        unsat_problem = manual_clique_problem(3, 3, "1-2, 2-3")
+
+        self.assertIn([clique_var(1, 1, 3), clique_var(1, 2, 3), clique_var(1, 3, 3)], sat_problem.clauses)
+        self.assertEqual(solve_problem(sat_problem, "CDCL").status, "SAT")
+        self.assertEqual(solve_problem(unsat_problem, "CDCL").status, "UNSAT")
+
+    def test_clique_target_validation(self):
+        with self.assertRaises(ValueError):
+            manual_clique_problem(3, 0, "1-2")
+        with self.assertRaises(ValueError):
+            manual_clique_problem(3, 4, "1-2")
+
+    def test_clique_random_graph_modes_are_buildable(self):
+        first = random_clique_problem(5, 0.4, 2, seed=3)
+        second = random_clique_problem(5, 0.4, 2, seed=3)
+        exact = exact_edges_clique_problem(5, 4, 2, seed=3)
+        average = average_degree_clique_problem(5, 2, 2, seed=3)
+
+        self.assertEqual(first.problem_type, "Clique")
+        self.assertEqual(first.clauses, second.clauses)
+        self.assertEqual(first.metadata["target"], 2)
+        self.assertEqual(first.metadata["mode"], "probability")
+        self.assertEqual(exact.metadata["mode"], "exact_edges")
+        self.assertEqual(exact.metadata["requested_edges"], 4)
+        self.assertEqual(average.metadata["mode"], "average_degree")
+        self.assertEqual(average.metadata["average_degree"], 2)
+
+    def test_clique_problem_from_snapshot(self):
+        problem = problem_from_snapshot({
+            "kind": "Clique",
+            "mode": "Manual",
+            "nodes": 3,
+            "target": 3,
+            "seed": None,
+            "edge_text": "1-2, 1-3, 2-3",
+        })
+
+        self.assertEqual(problem.problem_type, "Clique")
+        self.assertEqual(problem.metadata["target"], 3)
+        self.assertEqual(solve_problem(problem, "CDCL").status, "SAT")
+
+    def test_clique_graph_preview_helpers(self):
+        app = SATApp.__new__(SATApp)
+        row = BenchmarkRow(
+            "Clique n3_k2",
+            "Clique",
+            "CDCL",
+            "SAT",
+            0.0,
+            1,
+            3,
+            1,
+            node_count=3,
+            graph_edges=[(1, 2)],
+            decoded={"selected": [1, 2]},
+        )
+
+        self.assertTrue(app._is_graph_benchmark_row(row))
+        self.assertEqual(app._benchmark_node_color(row, 1), "#59a14f")
+        self.assertEqual(app._benchmark_node_color(row, 3), "#d8d8d8")
 
     def test_graph_coloring_manual_encoder(self):
         problem = manual_graph_coloring_problem(2, 2, "1-2")
@@ -164,6 +268,69 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(rows[0].status, "SAT")
         self.assertEqual(rows[0].problem_metadata["variables"], 6)
         self.assertEqual(rows[0].problem_metadata["clauses_requested"], 18)
+
+    def test_random_3sat_benchmark_sweep_supports_sat_mix(self):
+        rows = run_random_3sat_sweep([6], [3.0], ["CDCL"], repeats=1, seed=7, formula_mode="Random", sat_percentage=100)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "SAT")
+        self.assertEqual(rows[0].problem_metadata["mode"], "Random")
+        self.assertEqual(rows[0].problem_metadata["selected_mode"], "Planted SAT")
+        self.assertEqual(rows[0].problem_metadata["sat_percentage"], 100.0)
+
+    def test_clique_benchmark_sweep_rows(self):
+        rows = run_clique_sweep([3], [1.0], [3], ["CDCL"], repeats=1, seed=7)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].problem_type, "Clique")
+        self.assertEqual(rows[0].status, "SAT")
+        self.assertIn("k=3", rows[0].detail)
+
+    def test_graph_suite_reuses_graph_for_clique_and_independent_set(self):
+        rows = run_graph_suite_sweep(
+            [5],
+            [0.4],
+            ["Clique", "Independent Set"],
+            ["CDCL"],
+            repeats=1,
+            seed=7,
+            target_sizes=[2],
+        )
+
+        self.assertEqual({row.problem_type for row in rows}, {"Clique", "Independent Set"})
+        self.assertEqual(len({tuple(row.graph_edges) for row in rows}), 1)
+        self.assertEqual(len({row.problem_metadata["shared_graph_id"] for row in rows}), 1)
+        self.assertTrue(all(row.problem_metadata["suite"] for row in rows))
+        self.assertTrue(all("graph=" in row.detail for row in rows))
+
+    def test_graph_suite_reuses_graph_across_target_and_color_values(self):
+        rows = run_graph_suite_sweep(
+            [5],
+            [0.4],
+            ["Clique", "Graph Coloring"],
+            ["CDCL"],
+            repeats=1,
+            seed=7,
+            target_sizes=[2, 3],
+            color_counts=[2, 3],
+        )
+
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len({tuple(row.graph_edges) for row in rows}), 1)
+        self.assertEqual(
+            [row.problem_type for row in rows],
+            ["Graph Coloring", "Graph Coloring", "Clique", "Clique"],
+        )
+        self.assertEqual({row.problem_metadata.get("colors") for row in rows if row.problem_type == "Graph Coloring"}, {2, 3})
+        self.assertEqual({row.problem_metadata.get("target") for row in rows if row.problem_type == "Clique"}, {2, 3})
+
+    def test_graph_suite_validates_problem_selection(self):
+        with self.assertRaises(ValueError):
+            run_graph_suite_sweep([5], [0.4], [], ["CDCL"], repeats=1, target_sizes=[2])
+        with self.assertRaises(ValueError):
+            run_graph_suite_sweep([5], [0.4], ["Clique"], ["CDCL"], repeats=1)
+        with self.assertRaises(ValueError):
+            run_graph_suite_sweep([5], [0.4], ["Graph Coloring"], ["CDCL"], repeats=1)
 
     def test_average_benchmark_groups_finished_repeats_only(self):
         app = SATApp.__new__(SATApp)
@@ -579,9 +746,12 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("N-Queens", PROBLEM_KINDS)
             self.assertIn("Hamiltonian Path", PROBLEM_KINDS)
             self.assertIn("Independent Set", PROBLEM_KINDS)
+            self.assertIn("Clique", PROBLEM_KINDS)
             self.assertIn("Random 3-SAT", PROBLEM_KINDS)
             self.assertIn("N-Queens", BENCHMARK_PROBLEMS)
             self.assertIn("Random 3-SAT", BENCHMARK_PROBLEMS)
+            self.assertIn("Clique", BENCHMARK_PROBLEMS)
+            self.assertIn("Graph Suite", BENCHMARK_PROBLEMS)
             self.assertIn("WalkSAT", SOLVERS)
             self.assertIn("WalkSAT", app.solve_solver_guide.guide_text)
             self.assertIn("UNKNOWN", app.solve_solver_guide.guide_text)
@@ -617,14 +787,37 @@ class AppBackendTests(unittest.TestCase):
             app._refresh_problem_form()
             self.assertEqual(app.random_3sat_variables.get(), "50")
             self.assertEqual(app.random_3sat_mode.get(), "Planted SAT")
+            self.assertEqual(app.random_3sat_sat_percentage.get(), "50")
+            self.assertEqual(str(app.random_3sat_sat_percentage_entry.cget("state")), "disabled")
+            app.random_3sat_mode.set("Random")
+            app._refresh_random_3sat_controls()
+            self.assertEqual(str(app.random_3sat_sat_percentage_entry.cget("state")), "normal")
             app.random_3sat_variables.set("6")
             app.random_3sat_clauses.set("12")
             app.random_3sat_seed.set("3")
+            app.random_3sat_sat_percentage.set("")
+            problem = app.build_problem_from_form()
+            self.assertEqual(problem.metadata["mode"], "Random")
+            self.assertEqual(problem.metadata["selected_mode"], "Random")
+            self.assertIsNone(problem.metadata["sat_percentage"])
             app.random_3sat_mode.set("Forced UNSAT")
+            app._refresh_random_3sat_controls()
             problem = app.build_problem_from_form()
             self.assertEqual(problem.problem_type, "Random 3-SAT")
             self.assertEqual(problem.clause_count, 12)
             self.assertEqual(problem.metadata["mode"], "Forced UNSAT")
+
+            app.problem_kind.set("Clique")
+            app._refresh_problem_form()
+            self.assertEqual(app.problem_description.get(), "Choose at least k graph nodes so every chosen pair is connected by an edge.")
+            self.assertIn("target", app.graph_field_entries)
+            app.graph_nodes.set("3")
+            app.graph_target.set("3")
+            app.edge_text.delete("1.0", tk.END)
+            app.edge_text.insert("1.0", "1-2, 1-3, 2-3")
+            problem = app.build_problem_from_form()
+            self.assertEqual(problem.problem_type, "Clique")
+            self.assertEqual(problem.metadata["target"], 3)
 
             app.bench_problem.set("Sudoku")
             app._refresh_benchmark_form()
@@ -656,9 +849,30 @@ class AppBackendTests(unittest.TestCase):
             self.assertEqual(str(app.bench_graph_field_entries["probabilities"].cget("state")), "disabled")
             app.bench_problem.set("Random 3-SAT")
             app._refresh_benchmark_form()
-            self.assertEqual(app.benchmark_description.get(), "Generate random 3-literal clauses as planted SAT, forced UNSAT, or unconstrained random formulas.")
+            self.assertEqual(app.benchmark_description.get(), "Generate random 3-literal clauses as planted SAT, forced UNSAT, pure random, or a SAT/UNSAT mix.")
             self.assertEqual(app.bench_3sat_variables.get(), "20,50,100")
             self.assertEqual(app.bench_3sat_mode.get(), "Planted SAT")
+            self.assertEqual(app.bench_3sat_sat_percentage.get(), "50")
+            self.assertEqual(str(app.bench_3sat_sat_percentage_entry.cget("state")), "disabled")
+            app.bench_3sat_mode.set("Random")
+            app._refresh_benchmark_random_3sat_controls()
+            self.assertEqual(str(app.bench_3sat_sat_percentage_entry.cget("state")), "normal")
+            app.bench_problem.set("Clique")
+            app._refresh_benchmark_form()
+            self.assertIn("targets", app.bench_graph_field_entries)
+            self.assertEqual(app.benchmark_description.get(), "Choose at least k graph nodes so every chosen pair is connected by an edge.")
+            app.bench_problem.set("Graph Suite")
+            app._refresh_benchmark_form()
+            self.assertTrue(app.bench_suite_clique.get())
+            self.assertTrue(app.bench_suite_independent.get())
+            self.assertFalse(app.bench_suite_graph_coloring.get())
+            self.assertIn("targets", app.bench_graph_field_entries)
+            self.assertIn("colors", app.bench_graph_field_entries)
+            self.assertEqual(str(app.bench_graph_field_entries["targets"].cget("state")), "normal")
+            self.assertEqual(str(app.bench_graph_field_entries["colors"].cget("state")), "disabled")
+            app.bench_suite_graph_coloring.set(True)
+            app._refresh_benchmark_graph_controls()
+            self.assertEqual(str(app.bench_graph_field_entries["colors"].cget("state")), "normal")
         finally:
             root.destroy()
 
@@ -681,6 +895,48 @@ class AppBackendTests(unittest.TestCase):
 
             feed = app.feed_text.get("1.0", tk.END)
             self.assertIn("background hello", feed)
+        finally:
+            root.destroy()
+
+    def test_graph_suite_run_benchmark_builds_shared_graph_params(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            app.bench_problem.set("Graph Suite")
+            app._refresh_benchmark_form()
+            app.bench_nodes.set("5")
+            app.bench_probs.set("0.4")
+            app.bench_targets.set("2,3")
+            app.bench_colors.set("2")
+            app.bench_repeats.set("1")
+            app.bench_suite_graph_coloring.set(False)
+            app.bench_suite_hamiltonian.set(False)
+            app.bench_suite_independent.set(True)
+            app.bench_suite_clique.set(True)
+            captured = {}
+
+            class DummyJob:
+                pending_chart_refresh = False
+
+            def fake_start(title, process_target, params, **kwargs):
+                captured["title"] = title
+                captured["params"] = params
+                captured["kwargs"] = kwargs
+                return DummyJob()
+
+            app._start_process_worker = fake_start
+            app.run_benchmark()
+
+            self.assertEqual(captured["title"], "Benchmarking 4 solver runs")
+            self.assertEqual(captured["params"]["problem_type"], "Graph Suite")
+            self.assertEqual(captured["params"]["suite_problems"], ["Clique", "Independent Set"])
+            self.assertEqual(captured["params"]["target_sizes"], [2, 3])
+            self.assertEqual(captured["params"]["probabilities"], [0.4])
         finally:
             root.destroy()
 

@@ -17,6 +17,12 @@ except Exception:  # pragma: no cover - the app still runs without charts.
     Figure = None
     FigureCanvasTkAgg = None
 
+from problems.clique import (
+    average_degree_clique_problem,
+    exact_edges_clique_problem,
+    manual_clique_problem,
+    random_clique_problem,
+)
 from problems.dimacs_problem import dimacs_problem_from_text
 from problems.graph_coloring import (
     average_degree_graph_coloring_problem,
@@ -61,16 +67,18 @@ from sat_core.solver_runner import SOLVERS
 INPUT_GENERATED = Path("input/generated")
 BENCHMARK_OUTPUT = Path("output/benchmarks")
 SUDOKU_SIZES = (4, 9, 16, 25)
-PROBLEM_KINDS = ("Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "DIMACS/CNF")
-BENCHMARK_PROBLEMS = ("Graph Coloring", "Sudoku", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set")
-GRAPH_PROBLEM_KINDS = ("Graph Coloring", "Hamiltonian Path", "Independent Set")
+PROBLEM_KINDS = ("Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique", "DIMACS/CNF")
+BENCHMARK_PROBLEMS = ("Graph Coloring", "Graph Suite", "Sudoku", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique")
+GRAPH_PROBLEM_KINDS = ("Graph Coloring", "Hamiltonian Path", "Independent Set", "Clique")
 PROBLEM_DESCRIPTIONS = {
     "Sudoku": "Fill an n x n grid so each row, column, and square box contains every value exactly once.",
     "Graph Coloring": "Assign one of k colors to each node so adjacent nodes never share the same color.",
     "N-Queens": "Place n queens on an n x n chessboard so no two queens attack each other.",
-    "Random 3-SAT": "Generate random 3-literal clauses as planted SAT, forced UNSAT, or unconstrained random formulas.",
+    "Random 3-SAT": "Generate random 3-literal clauses as planted SAT, forced UNSAT, pure random, or a SAT/UNSAT mix.",
     "Hamiltonian Path": "Find a path through an undirected graph that visits every node exactly once.",
     "Independent Set": "Choose at least k graph nodes so no two chosen nodes are connected by an edge.",
+    "Clique": "Choose at least k graph nodes so every chosen pair is connected by an edge.",
+    "Graph Suite": "Run selected graph problems on the exact same generated graph for fair side-by-side benchmarks.",
     "DIMACS/CNF": "Paste or load SAT clauses directly in DIMACS CNF format.",
 }
 SOLVER_GUIDE_ROWS = (
@@ -1372,6 +1380,7 @@ class SATApp:
         self.random_3sat_clauses = tk.StringVar(value="210")
         self.random_3sat_seed = tk.StringVar(value="1")
         self.random_3sat_mode = tk.StringVar(value="Planted SAT")
+        self.random_3sat_sat_percentage = tk.StringVar(value="50")
 
         ttk.Label(fields, text="Variables").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Entry(fields, textvariable=self.random_3sat_variables, width=12).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
@@ -1380,13 +1389,31 @@ class SATApp:
         ttk.Label(fields, text="Seed").grid(row=2, column=0, sticky="w", pady=2)
         ttk.Entry(fields, textvariable=self.random_3sat_seed, width=12).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
         ttk.Label(fields, text="Formula mode").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Combobox(
+        mode_combo = ttk.Combobox(
             fields,
             textvariable=self.random_3sat_mode,
             values=RANDOM_3SAT_MODES,
             state="readonly",
             width=12,
-        ).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        )
+        mode_combo.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_random_3sat_controls())
+        ttk.Label(fields, text="SAT target % (blank=random)").grid(row=4, column=0, sticky="w", pady=2)
+        self.random_3sat_sat_percentage_entry = ttk.Entry(fields, textvariable=self.random_3sat_sat_percentage, width=12)
+        self.random_3sat_sat_percentage_entry.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self._refresh_random_3sat_controls()
+
+    def _refresh_random_3sat_controls(self) -> None:
+        if not hasattr(self, "random_3sat_sat_percentage_entry"):
+            return
+        state = tk.NORMAL if self.random_3sat_mode.get() == "Random" else tk.DISABLED
+        self.random_3sat_sat_percentage_entry.configure(state=state)
+
+    def _random_3sat_sat_percentage_from_text(self, text: str) -> float | None:
+        raw = str(text).strip()
+        if not raw:
+            return None
+        return float(raw)
 
     def _build_graph_form(self) -> None:
         self.graph_mode = tk.StringVar(value="Manual")
@@ -1411,7 +1438,7 @@ class SATApp:
         labels = [("nodes", "Nodes", self.graph_nodes)]
         if self.problem_kind.get() == "Graph Coloring":
             labels.append(("colors", "Colors", self.graph_colors))
-        if self.problem_kind.get() == "Independent Set":
+        if self.problem_kind.get() in ("Independent Set", "Clique"):
             labels.append(("target", "Target k", self.graph_target))
         labels.extend([
             ("probability", "Probability p", self.graph_probability),
@@ -1463,7 +1490,7 @@ class SATApp:
         ttk.Combobox(
             type_row,
             textvariable=self.dimacs_loaded_problem_type,
-            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"),
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique"),
             state="readonly",
             width=22,
         ).pack(side=tk.LEFT, padx=(8, 0))
@@ -1495,11 +1522,13 @@ class SATApp:
 
         if kind == "Random 3-SAT":
             seed = self.random_3sat_seed.get().strip()
+            formula_mode = self.random_3sat_mode.get()
             return random_3sat_problem(
                 int(self.random_3sat_variables.get()),
                 int(self.random_3sat_clauses.get()),
                 seed=int(seed) if seed else None,
-                formula_mode=self.random_3sat_mode.get(),
+                formula_mode=formula_mode,
+                sat_percentage=self._random_3sat_sat_percentage_from_text(self.random_3sat_sat_percentage.get()) if formula_mode == "Random" else None,
             )
 
         if kind == "Graph Coloring":
@@ -1565,6 +1594,27 @@ class SATApp:
 
             return manual_independent_set_problem(nodes, target, self.edge_text.get("1.0", tk.END))
 
+        if kind == "Clique":
+            nodes = int(self.graph_nodes.get())
+            target = int(self.graph_target.get())
+
+            if self.graph_mode.get() == "Probability":
+                probability = float(self.graph_probability.get())
+                seed = self.graph_seed.get().strip()
+                return random_clique_problem(nodes, probability, target, seed=int(seed) if seed else None)
+
+            if self.graph_mode.get() == "Exact edges":
+                edge_count = int(self.graph_edge_count.get())
+                seed = self.graph_seed.get().strip()
+                return exact_edges_clique_problem(nodes, edge_count, target, seed=int(seed) if seed else None)
+
+            if self.graph_mode.get() == "Average degree":
+                average_degree = float(self.graph_average_degree.get())
+                seed = self.graph_seed.get().strip()
+                return average_degree_clique_problem(nodes, average_degree, target, seed=int(seed) if seed else None)
+
+            return manual_clique_problem(nodes, target, self.edge_text.get("1.0", tk.END))
+
         text = self.dimacs_input.get("1.0", tk.END)
         return dimacs_problem_from_text(text)
 
@@ -1579,12 +1629,14 @@ class SATApp:
 
         if kind == "Random 3-SAT":
             seed = self.random_3sat_seed.get().strip()
+            formula_mode = self.random_3sat_mode.get()
             return {
                 "kind": "Random 3-SAT",
                 "variables": int(self.random_3sat_variables.get()),
                 "clauses": int(self.random_3sat_clauses.get()),
                 "seed": int(seed) if seed else None,
-                "formula_mode": self.random_3sat_mode.get(),
+                "formula_mode": formula_mode,
+                "sat_percentage": self._random_3sat_sat_percentage_from_text(self.random_3sat_sat_percentage.get()) if formula_mode == "Random" else None,
             }
 
         if kind in GRAPH_PROBLEM_KINDS:
@@ -1597,7 +1649,7 @@ class SATApp:
             }
             if kind == "Graph Coloring":
                 snapshot["colors"] = int(self.graph_colors.get())
-            if kind == "Independent Set":
+            if kind in ("Independent Set", "Clique"):
                 snapshot["target"] = int(self.graph_target.get())
             if mode == "Probability":
                 snapshot["probability"] = float(self.graph_probability.get())
@@ -1769,13 +1821,16 @@ class SATApp:
         if problem.problem_type == "N-Queens":
             return f"n={metadata.get('size', '?')}"
         if problem.problem_type == "Random 3-SAT":
+            mode = metadata.get("mode", "random")
+            if mode == "Random" and metadata.get("sat_percentage") is not None:
+                mode = f"{mode} ({metadata.get('sat_percentage'):g}% SAT, selected {metadata.get('selected_mode', '-')})"
             return (
                 f"n={metadata.get('variables', '?')}, "
                 f"m={metadata.get('clauses_requested', '?')}, "
                 f"ratio={metadata.get('ratio', 0):.2f}, "
-                f"{metadata.get('mode', 'random')}"
+                f"{mode}"
             )
-        if problem.problem_type == "Independent Set":
+        if problem.problem_type in ("Independent Set", "Clique"):
             return f"k={metadata.get('target', '?')}, edges={metadata.get('edges', '-')}"
         if problem.problem_type in ("Graph Coloring", "Hamiltonian Path"):
             mode = metadata.get("mode", "")
@@ -1929,7 +1984,7 @@ class SATApp:
             messagebox.showerror("Cannot load DIMACS", str(exc))
 
     def _infer_dimacs_problem_type(self, text: str) -> str:
-        valid_types = {"DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"}
+        valid_types = {"DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique"}
         for raw_line in text.splitlines():
             line = raw_line.strip()
             if not line.startswith("c"):
@@ -1955,7 +2010,7 @@ class SATApp:
         ttk.Combobox(
             dialog,
             textvariable=chosen,
-            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"),
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique"),
             state="readonly",
             width=28,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=12)
@@ -2021,6 +2076,7 @@ class SATApp:
         self.bench_3sat_variables = tk.StringVar(value="20,50,100")
         self.bench_3sat_ratios = tk.StringVar(value="3.5,4.2,5.0")
         self.bench_3sat_mode = tk.StringVar(value="Planted SAT")
+        self.bench_3sat_sat_percentage = tk.StringVar(value="50")
         self.bench_repeats = tk.StringVar(value="1")
         self.bench_timeout_seconds = tk.StringVar(value="30")
         self.bench_seed = tk.StringVar(value="1")
@@ -2039,6 +2095,10 @@ class SATApp:
         self.bench_walksat_max_flips = tk.StringVar(value="10000")
         self.bench_walksat_noise = tk.StringVar(value="0.5")
         self.bench_walksat_random_seed = tk.StringVar(value="")
+        self.bench_suite_graph_coloring = tk.BooleanVar(value=False)
+        self.bench_suite_hamiltonian = tk.BooleanVar(value=False)
+        self.bench_suite_independent = tk.BooleanVar(value=True)
+        self.bench_suite_clique = tk.BooleanVar(value=True)
         self.bench_sudoku_size_vars = {
             size: tk.BooleanVar(value=size in (4, 9))
             for size in SUDOKU_BENCHMARK_SIZES
@@ -2400,6 +2460,9 @@ class SATApp:
         elif problem == "Random 3-SAT":
             self.benchmark_controls.configure(text="Random 3-SAT Benchmark")
             self._build_random_3sat_benchmark_form()
+        elif problem == "Graph Suite":
+            self.benchmark_controls.configure(text="Graph Suite Benchmark")
+            self._build_graph_suite_benchmark_form()
         else:
             self.benchmark_controls.configure(text=f"{problem} Benchmark")
             self._build_graph_benchmark_form()
@@ -2437,7 +2500,7 @@ class SATApp:
         ]
         if self.bench_problem.get() == "Graph Coloring":
             fields.append(("colors", "Colors", self.bench_colors))
-        if self.bench_problem.get() == "Independent Set":
+        if self.bench_problem.get() in ("Independent Set", "Clique"):
             fields.append(("targets", "Target k values", self.bench_targets))
         fields.extend([
             ("probabilities", "Probabilities", self.bench_probs),
@@ -2454,15 +2517,73 @@ class SATApp:
 
         self._refresh_benchmark_graph_controls()
 
+    def _build_graph_suite_benchmark_form(self) -> None:
+        self.bench_graph_field_entries = {}
+        self.bench_graph_mode_buttons = {}
+
+        ttk.Label(self.benchmark_input_frame, text="Problems").grid(row=0, column=0, sticky="nw", pady=2)
+        problem_frame = ttk.Frame(self.benchmark_input_frame)
+        problem_frame.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=2)
+        suite_options = [
+            ("Clique", self.bench_suite_clique),
+            ("Independent Set", self.bench_suite_independent),
+            ("Graph Coloring", self.bench_suite_graph_coloring),
+            ("Hamiltonian Path", self.bench_suite_hamiltonian),
+        ]
+        for index, (label, variable) in enumerate(suite_options):
+            ttk.Checkbutton(
+                problem_frame,
+                text=label,
+                variable=variable,
+                command=self._refresh_benchmark_graph_controls,
+            ).grid(row=index // 2, column=index % 2, sticky="w", padx=(0, 10), pady=2)
+
+        ttk.Label(self.benchmark_input_frame, text="Generation").grid(row=1, column=0, sticky="w", pady=2)
+        mode_row = ttk.Frame(self.benchmark_input_frame)
+        mode_row.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=2)
+        for label, value in [
+            ("G(n,p)", "Probability"),
+            ("G(n,m)", "Exact edges"),
+            ("G(n,d)", "Average degree"),
+        ]:
+            button = ttk.Radiobutton(
+                mode_row,
+                text=label,
+                variable=self.bench_generation_mode,
+                value=value,
+                command=self._refresh_benchmark_graph_controls,
+            )
+            button.pack(side=tk.LEFT, padx=(0, 10))
+            self.bench_graph_mode_buttons[value] = button
+
+        fields = [
+            ("nodes", "Nodes", self.bench_nodes),
+            ("colors", "Colors", self.bench_colors),
+            ("targets", "Target k values", self.bench_targets),
+            ("probabilities", "Probabilities", self.bench_probs),
+            ("edge_counts", "Edge counts", self.bench_edges),
+            ("average_degrees", "Average degrees", self.bench_average_degrees),
+            ("seed", "Seed", self.bench_seed),
+        ]
+
+        for row, (key, label, variable) in enumerate(fields, start=2):
+            ttk.Label(self.benchmark_input_frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            entry = ttk.Entry(self.benchmark_input_frame, textvariable=variable, width=18)
+            entry.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
+            self.bench_graph_field_entries[key] = entry
+
+        self._refresh_benchmark_graph_controls()
+
     def _refresh_benchmark_graph_controls(self) -> None:
         if not hasattr(self, "bench_graph_field_entries"):
             return
 
         mode = self.bench_generation_mode.get()
+        is_suite = self.bench_problem.get() == "Graph Suite"
         active_by_key = {
             "nodes": True,
-            "colors": True,
-            "targets": True,
+            "colors": (not is_suite) or self.bench_suite_graph_coloring.get(),
+            "targets": (not is_suite) or self.bench_suite_independent.get() or self.bench_suite_clique.get(),
             "probabilities": mode == "Probability",
             "edge_counts": mode == "Exact edges",
             "average_degrees": mode == "Average degree",
@@ -2484,13 +2605,29 @@ class SATApp:
         ttk.Label(self.benchmark_input_frame, text="Seed").grid(row=2, column=0, sticky="w", pady=2)
         ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_seed, width=18).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
         ttk.Label(self.benchmark_input_frame, text="Formula mode").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Combobox(
+        mode_combo = ttk.Combobox(
             self.benchmark_input_frame,
             textvariable=self.bench_3sat_mode,
             values=RANDOM_3SAT_MODES,
             state="readonly",
             width=18,
-        ).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        )
+        mode_combo.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_benchmark_random_3sat_controls())
+        ttk.Label(self.benchmark_input_frame, text="SAT target % (blank=random)").grid(row=4, column=0, sticky="w", pady=2)
+        self.bench_3sat_sat_percentage_entry = ttk.Entry(
+            self.benchmark_input_frame,
+            textvariable=self.bench_3sat_sat_percentage,
+            width=18,
+        )
+        self.bench_3sat_sat_percentage_entry.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self._refresh_benchmark_random_3sat_controls()
+
+    def _refresh_benchmark_random_3sat_controls(self) -> None:
+        if not hasattr(self, "bench_3sat_sat_percentage_entry"):
+            return
+        state = tk.NORMAL if self.bench_3sat_mode.get() == "Random" else tk.DISABLED
+        self.bench_3sat_sat_percentage_entry.configure(state=state)
 
     def _build_sudoku_benchmark_form(self) -> None:
         ttk.Label(self.benchmark_input_frame, text="Sizes").grid(row=0, column=0, sticky="nw", pady=2)
@@ -2510,6 +2647,40 @@ class SATApp:
             for size in SUDOKU_BENCHMARK_SIZES
             if self.bench_sudoku_size_vars[size].get()
         ]
+
+    def _selected_graph_suite_problems(self) -> list[str]:
+        selected = []
+        if self.bench_suite_clique.get():
+            selected.append("Clique")
+        if self.bench_suite_independent.get():
+            selected.append("Independent Set")
+        if self.bench_suite_graph_coloring.get():
+            selected.append("Graph Coloring")
+        if self.bench_suite_hamiltonian.get():
+            selected.append("Hamiltonian Path")
+        return selected
+
+    def _graph_benchmark_inputs_from_form(self) -> tuple[str, list[float], list[int], list[float], list]:
+        if self.bench_generation_mode.get() == "Exact edges":
+            edge_counts = parse_int_list(self.bench_edges.get())
+            return "exact_edges", [], edge_counts, [], edge_counts
+        if self.bench_generation_mode.get() == "Average degree":
+            average_degrees = parse_float_list(self.bench_average_degrees.get())
+            return "average_degree", [], [], average_degrees, average_degrees
+        probabilities = parse_float_list(self.bench_probs.get())
+        return "probability", probabilities, [], [], probabilities
+
+    def _graph_suite_problem_value_count(self, suite_problems: list[str], target_sizes: list[int], color_counts: list[int]) -> int:
+        total = 0
+        if "Clique" in suite_problems:
+            total += len(target_sizes)
+        if "Independent Set" in suite_problems:
+            total += len(target_sizes)
+        if "Graph Coloring" in suite_problems:
+            total += len(color_counts)
+        if "Hamiltonian Path" in suite_problems:
+            total += 1
+        return total
 
     def run_benchmark(self) -> None:
         try:
@@ -2556,6 +2727,7 @@ class SATApp:
                 seed_text = self.bench_seed.get().strip()
                 variable_counts = parse_int_list(self.bench_3sat_variables.get())
                 clause_ratios = parse_float_list(self.bench_3sat_ratios.get())
+                formula_mode = self.bench_3sat_mode.get()
                 total_runs = len(variable_counts) * len(clause_ratios) * repeats * len(solvers)
                 params = {
                     "problem_type": "Random 3-SAT",
@@ -2564,7 +2736,43 @@ class SATApp:
                     "solvers": solvers,
                     "repeats": repeats,
                     "seed": int(seed_text) if seed_text else None,
-                    "formula_mode": self.bench_3sat_mode.get(),
+                    "formula_mode": formula_mode,
+                    "sat_percentage": self._random_3sat_sat_percentage_from_text(self.bench_3sat_sat_percentage.get()) if formula_mode == "Random" else None,
+                    "logging_options": logging_options,
+                    "timeout_seconds": timeout_seconds,
+                }
+            elif self.bench_problem.get() == "Graph Suite":
+                seed_text = self.bench_seed.get().strip()
+                node_counts = parse_int_list(self.bench_nodes.get())
+                seed = int(seed_text) if seed_text else None
+                generation_mode, probabilities, edge_counts, average_degrees, sweep_values = self._graph_benchmark_inputs_from_form()
+                suite_problems = self._selected_graph_suite_problems()
+                if not suite_problems:
+                    raise ValueError("Select at least one Graph Suite problem")
+                color_counts = parse_int_list(self.bench_colors.get()) if self.bench_suite_graph_coloring.get() else []
+                needs_targets = self.bench_suite_independent.get() or self.bench_suite_clique.get()
+                target_sizes = parse_int_list(self.bench_targets.get()) if needs_targets else []
+                if needs_targets and not target_sizes:
+                    raise ValueError("Graph Suite target problems need at least one target k value")
+                if self.bench_suite_graph_coloring.get() and not color_counts:
+                    raise ValueError("Graph Suite graph coloring needs at least one color count")
+                suite_count = self._graph_suite_problem_value_count(suite_problems, target_sizes, color_counts)
+                if suite_count <= 0:
+                    raise ValueError("Graph Suite needs target k values, color counts, or Hamiltonian Path selected")
+                total_runs = len(node_counts) * len(sweep_values) * suite_count * repeats * len(solvers)
+                params = {
+                    "problem_type": "Graph Suite",
+                    "node_counts": node_counts,
+                    "probabilities": probabilities,
+                    "edge_counts": edge_counts,
+                    "average_degrees": average_degrees,
+                    "suite_problems": suite_problems,
+                    "color_counts": color_counts,
+                    "target_sizes": target_sizes,
+                    "solvers": solvers,
+                    "repeats": repeats,
+                    "seed": seed,
+                    "generation_mode": generation_mode,
                     "logging_options": logging_options,
                     "timeout_seconds": timeout_seconds,
                 }
@@ -2572,29 +2780,12 @@ class SATApp:
                 seed_text = self.bench_seed.get().strip()
                 node_counts = parse_int_list(self.bench_nodes.get())
                 seed = int(seed_text) if seed_text else None
-                if self.bench_generation_mode.get() == "Exact edges":
-                    generation_mode = "exact_edges"
-                    probabilities = []
-                    edge_counts = parse_int_list(self.bench_edges.get())
-                    average_degrees = []
-                    sweep_values = edge_counts
-                elif self.bench_generation_mode.get() == "Average degree":
-                    generation_mode = "average_degree"
-                    probabilities = []
-                    edge_counts = []
-                    average_degrees = parse_float_list(self.bench_average_degrees.get())
-                    sweep_values = average_degrees
-                else:
-                    generation_mode = "probability"
-                    probabilities = parse_float_list(self.bench_probs.get())
-                    edge_counts = []
-                    average_degrees = []
-                    sweep_values = probabilities
+                generation_mode, probabilities, edge_counts, average_degrees, sweep_values = self._graph_benchmark_inputs_from_form()
                 if self.bench_problem.get() == "Graph Coloring":
                     color_counts = parse_int_list(self.bench_colors.get())
                     target_sizes = []
                     specific_count = len(color_counts)
-                elif self.bench_problem.get() == "Independent Set":
+                elif self.bench_problem.get() in ("Independent Set", "Clique"):
                     color_counts = []
                     target_sizes = parse_int_list(self.bench_targets.get())
                     specific_count = len(target_sizes)
@@ -2836,12 +3027,19 @@ class SATApp:
             ]
 
         if row.problem_type == "Random 3-SAT":
+            generation = row.generation_mode or metadata.get("mode", "-")
+            if metadata.get("mode") == "Random" and metadata.get("sat_percentage") is not None:
+                generation = (
+                    f"{generation} ({metadata.get('sat_percentage'):g}% SAT, "
+                    f"{metadata.get('unsat_percentage', 0):g}% UNSAT)"
+                )
             return [
                 f"Variables: {metadata.get('variables', row.variables)}",
                 f"Clauses: {metadata.get('clauses_requested', row.clauses)}",
                 f"Clause width: {metadata.get('width', 3)}",
                 f"Ratio: {metadata.get('ratio', 0):.2f}",
-                f"Generation: {row.generation_mode or metadata.get('mode', '-')}",
+                f"Generation: {generation}",
+                f"Selected: {metadata.get('selected_mode', '-')}",
                 f"Seed: {row.seed}",
             ]
 
@@ -2851,13 +3049,17 @@ class SATApp:
             density = "-"
             if nodes and nodes > 1 and edges is not None:
                 density = f"{(2 * edges / (nodes * (nodes - 1))):.4f}"
-            return [
+            lines = [
                 f"Nodes: {row.node_count}",
                 f"Edges: {edges if edges is not None else row.edge_count}",
                 f"Density: {density}",
                 f"Generation: {row.generation_mode or '-'}",
                 f"Seed: {row.seed}",
             ]
+            if metadata.get("suite"):
+                lines.insert(0, f"Shared graph: {metadata.get('shared_graph_id', '-')}")
+                lines.insert(1, f"Graph case: {metadata.get('suite_graph_label', '-')}")
+            return lines
 
         return []
 
@@ -2912,11 +3114,15 @@ class SATApp:
 
     def _format_random_3sat_data(self, row: BenchmarkRow) -> str:
         metadata = row.problem_metadata or {}
+        sat_percentage = metadata.get("sat_percentage")
+        sat_chance = "-" if sat_percentage is None else f"{sat_percentage:g}%"
         lines = [
             f"Variables: {metadata.get('variables', row.variables)}",
             f"Clauses: {metadata.get('clauses_requested', row.clauses)}",
             f"Ratio: {metadata.get('ratio', 0):.2f}",
             f"Mode: {metadata.get('mode', '-')}",
+            f"SAT target: {sat_chance}",
+            f"Selected: {metadata.get('selected_mode', '-')}",
             f"Seed: {row.seed}",
             "",
             "First clauses:",
@@ -3212,7 +3418,7 @@ class SATApp:
             color = row.decoded.get(node)
             if color is not None:
                 return palette[(int(color) - 1) % len(palette)]
-        if row.problem_type == "Independent Set" and isinstance(row.decoded, dict):
+        if row.problem_type in ("Independent Set", "Clique") and isinstance(row.decoded, dict):
             selected = set(row.decoded.get("selected", []))
             return "#59a14f" if node in selected else "#d8d8d8"
         if row.problem_type == "Hamiltonian Path" and isinstance(row.decoded, dict):

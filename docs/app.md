@@ -22,13 +22,17 @@ Choose one problem type:
   placed on an `n x n` board with no shared row, column, or diagonal.
 - Random 3-SAT: choose variable count, clause count, optional seed, and formula
   mode. `Planted SAT` guarantees a satisfying assignment, `Forced UNSAT`
-  inserts a small unsatisfiable 3-SAT core, and `Random` leaves satisfiability
-  unconstrained.
+  inserts a small unsatisfiable 3-SAT core. In `Random`, leave `SAT target %`
+  blank for pure unconstrained random formulas, or enter a percentage to mix
+  planted SAT formulas with forced UNSAT formulas.
 - Hamiltonian Path: choose manual or random undirected graph input. The app
   asks whether some path visits every node exactly once.
 - Independent Set: choose manual or random undirected graph input plus target
   `k`. The app asks whether at least `k` nodes can be chosen with no edges
   between chosen nodes.
+- Clique: choose manual or random undirected graph input plus target `k`. The
+  app asks whether at least `k` nodes can be chosen so every chosen pair has an
+  edge between them.
 - DIMACS/CNF: paste or load raw DIMACS clauses.
 
 Then choose `CDCL`, `DPLL`, or `WalkSAT`, generate the CNF preview, and solve.
@@ -93,10 +97,15 @@ built-in deterministic
 larger sizes are opt-in because they can take much longer. N-Queens benchmarks
 sweep board sizes. Random 3-SAT benchmarks sweep variable counts and
 clause-to-variable ratios; use `Planted SAT` for satisfiable WalkSAT targets,
-`Forced UNSAT` for complete-solver UNSAT proofs, or `Random` for natural
-near-threshold mixes. Hamiltonian Path and Independent Set benchmarks reuse the
-same random graph modes as graph coloring; Independent Set also sweeps target
-`k` values. Benchmark solver logs can use the same normal, periodic progress,
+`Forced UNSAT` for complete-solver UNSAT proofs, `Random` with blank
+`SAT target %` for pure random formulas, or `Random` plus `SAT target %` for a
+controlled SAT/UNSAT mix across repeats. Hamiltonian Path, Independent Set, and
+Clique benchmarks reuse the same random graph modes as graph coloring;
+Independent Set and Clique also sweep target `k` values. `Graph Suite` generates
+one shared graph per graph setting and repeat, then runs the selected graph
+problems on those exact same edges; it defaults to comparing Clique and
+Independent Set. Benchmark solver logs can use the same normal, periodic
+progress,
 or capped verbose modes as Solve. The benchmark tab also has the same CDCL
 heuristic controls as the Solve tab. The compact option summary is stored in
 each benchmark row, exported in CSV files, shown in the selected-case details,

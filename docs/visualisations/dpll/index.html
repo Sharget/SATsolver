@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>DPLL SAT Visualizator — versiune reparată</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --panel-soft: #f8fafc;
+    --border: #d8dde8;
+    --text: #182033;
+    --muted: #667085;
+    --blue-bg: #dbeafe;
+    --blue: #1d4ed8;
+    --red-bg: #fee2e2;
+    --red: #b91c1c;
+    --green-bg: #dcfce7;
+    --green: #15803d;
+    --yellow-bg: #fef3c7;
+    --yellow: #b45309;
+    --orange-bg: #ffedd5;
+    --orange: #c2410c;
+    --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --shadow: 0 10px 25px rgba(15, 23, 42, .08);
+  }
+
+  html, body {
+    height: 100%;
+  }
+
+  body {
+    height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    height: 66px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 2px 10px rgba(15,23,42,.04);
+  }
+
+  header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: .2px;
+  }
+
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    border-radius: 999px;
+    padding: 4px 9px;
+    background: var(--blue-bg);
+    color: var(--blue);
+    border: 1px solid rgba(29, 78, 216, .18);
+  }
+
+  .layout {
+    height: calc(100vh - 66px - 34px);
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 345px minmax(760px, 1fr);
+    grid-template-rows: minmax(0, 1fr) 230px;
+    gap: 0;
+  }
+
+  .panel-cnf {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 14px 15px;
+    overflow: auto;
+    grid-row: 1 / 3;
+  }
+
+  .panel-tree {
+    padding: 14px 205px 12px 18px;
+    overflow: hidden;
+    overflow: auto;
+  }
+
+  .panel-impl {
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    padding: 10px 205px 8px 18px;
+    overflow: hidden;
+    overflow: auto;
+  }
+
+  .section-title {
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: .8px;
+    font-weight: 700;
+    margin-bottom: 7px;
+  }
+
+  .clauses {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .clause {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: #fafafa;
+    border: 1.5px solid var(--border);
+    transition: .2s ease;
+  }
+
+  .clause.active {
+    background: var(--yellow-bg);
+    border-color: #f59e0b;
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, .16);
+  }
+
+  .clause.conflict-clause {
+    background: var(--red-bg);
+    border-color: #ef4444;
+    box-shadow: 0 0 0 4px rgba(239, 68, 68, .12);
+  }
+
+  .clause.sat-clause {
+    background: var(--green-bg);
+    border-color: #22c55e;
+  }
+
+  .side-block {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .var-table {
+    display: grid;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .var-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 5px 8px;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .badge.empty { color: var(--muted); background: #eef2f7; }
+  .badge.zero { color: var(--red); background: var(--red-bg); }
+  .badge.one { color: var(--green); background: var(--green-bg); }
+  .badge.forced { color: var(--yellow); background: var(--yellow-bg); border: 1px solid rgba(180, 83, 9, .25); }
+
+  .step-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 9px 12px;
+    min-height: 44px;
+    margin-bottom: 9px;
+    line-height: 1.55;
+    font-size: 13px;
+    box-shadow: var(--shadow);
+  }
+
+  .step-box strong { color: var(--blue); }
+
+  .svg-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 8px;
+    box-shadow: var(--shadow);
+    width: min(100%, 900px);
+    min-width: 0;
+    height: calc(100% - 92px);
+  }
+
+
+  #tree-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  #impl-svg {
+    display: block;
+    width: min(100%, 860px);
+    height: 170px;
+    overflow: visible;
+  }
+
+  .tree-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .mini-note {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .legend {
+    height: 34px;
+    display: flex;
+    gap: 13px;
+    align-items: center;
+    flex-wrap: nowrap;
+    padding: 6px 22px;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .legend-dot {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+  }
+
+  .ld-blue { background: var(--blue-bg); border-color: var(--blue); }
+  .ld-yellow { background: var(--yellow-bg); border-color: #f59e0b; }
+  .ld-red { background: var(--red-bg); border-color: var(--red); }
+  .ld-green { background: var(--green-bg); border-color: var(--green); }
+
+  .controls {
+    position: fixed;
+    right: 16px;
+    top: 120px;
+    z-index: 20;
+    width: 205px;
+    background: rgba(255, 255, 255, .96);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: 0 16px 35px rgba(15, 23, 42, .16);
+    backdrop-filter: blur(10px);
+  }
+
+  .controls::before {
+    content: "Control pași";
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    font-weight: 800;
+    margin-bottom: 2px;
+  }
+
+  button {
+    border: 1.5px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 7px 10px;
+    border-radius: 9px;
+    font-family: var(--font-ui);
+    font-weight: 650;
+    font-size: 13px;
+    cursor: pointer;
+    transition: .15s ease;
+    width: 100%;
+    justify-content: center;
+  }
+
+  button:hover:not(:disabled) {
+    background: #eef2ff;
+    border-color: #93c5fd;
+  }
+
+  button:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+
+  button.primary {
+    background: var(--blue);
+    color: white;
+    border-color: var(--blue);
+  }
+
+  button.primary:hover:not(:disabled) {
+    background: #1e40af;
+  }
+
+  button.danger {
+    color: var(--red);
+    border-color: #fecaca;
+  }
+
+  button.danger:hover:not(:disabled) {
+    background: var(--red-bg);
+    border-color: #fca5a5;
+  }
+
+  .step-counter {
+    margin-left: 0;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-align: center;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+
+  @media (max-width: 900px) {
+    .layout {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto auto;
+    }
+    .panel-cnf {
+      grid-row: auto;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-impl { grid-column: auto; }
+    .step-counter {
+    margin-left: 0;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-align: center;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Vizualizator DPLL</h1>
+  <span class="tag">SAT / CNF</span>
+  <span class="tag" style="background:var(--green-bg);color:var(--green)">demo educativ</span>
+</header>
+
+<div class="layout">
+  <aside class="panel-cnf">
+    <div class="section-title">Formula CNF</div>
+    <div class="clauses" id="clause-list"></div>
+
+    <div class="side-block">
+      <div class="section-title">Atribuiri curente</div>
+      <div class="var-table" id="var-table"></div>
+    </div>
+
+    <div class="side-block">
+      <div class="section-title">Observație logică</div>
+      <p style="font-size:13px;line-height:1.55;color:var(--muted)">
+        Highlight-ul galben indică o clauză folosită pentru propagare / decizie forțată.
+        Highlight-ul roșu indică exact clauzele care produc conflictul curent.
+      </p>
+    </div>
+  </aside>
+
+  <main class="panel-tree">
+    <div class="tree-header">
+      <div>
+        <div class="section-title">Arborele de decizie DPLL</div>
+        <div class="mini-note">Valorile de pe muchii: 0 = fals, 1 = adevărat. Nodurile galbene arată pasul curent.</div>
+      </div>
+    </div>
+    <div class="step-box" id="step-desc">Apasă <strong>Pas următor</strong> pentru a începe demonstrația.</div>
+    <div class="svg-card">
+      <svg id="tree-svg" width="680" height="390" aria-label="Arbore DPLL"></svg>
+    </div>
+  </main>
+
+  <section class="panel-impl">
+    <div class="section-title">Implication graph / propagări</div>
+    <svg id="impl-svg" width="720" height="120" aria-label="Implication graph"></svg>
+  </section>
+</div>
+
+<div class="legend">
+  <strong style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.7px">Legendă:</strong>
+  <span class="legend-item"><span class="legend-dot ld-blue"></span>decizie / variabilă</span>
+  <span class="legend-item"><span class="legend-dot ld-yellow"></span>pas curent / forced decision</span>
+  <span class="legend-item"><span class="legend-dot ld-red"></span>conflict</span>
+  <span class="legend-item"><span class="legend-dot ld-green"></span>SAT</span>
+</div>
+
+<div class="controls">
+  <button id="btn-prev">← Pas anterior</button>
+  <button id="btn-next" class="primary">Pas următor →</button>
+  <button id="btn-auto">▶ Auto play</button>
+  <button id="btn-reset" class="danger">↺ Reset</button>
+  <span class="step-counter" id="step-counter">Pas 0 / 14</span>
+</div>
+
+<script>
+const CLAUSES = [
+  { id:0, label:"(¬a ∨ b ∨ c)",   reason:"dacă a=1 și b=0, forțează c=1" },
+  { id:1, label:"(a ∨ c ∨ d)",    reason:"dacă a=0 și c=0, forțează d=1" },
+  { id:2, label:"(a ∨ c ∨ ¬d)",   reason:"dacă a=0 și c=0, forțează d=0" },
+  { id:3, label:"(a ∨ ¬c ∨ d)",   reason:"dacă a=0 și c=1, forțează d=1" },
+  { id:4, label:"(a ∨ ¬c ∨ ¬d)",  reason:"dacă a=0 și c=1, forțează d=0" },
+  { id:5, label:"(¬b ∨ ¬c ∨ d)",  reason:"dacă b=1 și c=1, forțează d=1" },
+  { id:6, label:"(¬a ∨ b ∨ ¬c)",  reason:"dacă a=1 și b=0, forțează c=0" },
+  { id:7, label:"(¬a ∨ ¬b ∨ c)",  reason:"dacă a=1 și b=1, forțează c=1" },
+];
+
+const BASE_NODES = {
+  root: { id:"root", label:"a", x:360, y:45 },
+  a0: { id:"a0", label:"b", x:205, y:120 },
+  a0b0: { id:"a0b0", label:"c", x:125, y:205 },
+  a0b0c0: { id:"a0b0c0", label:"✗", x:80, y:300 },
+  a0b0c1: { id:"a0b0c1", label:"✗", x:160, y:300 },
+  a0b1: { id:"a0b1", label:"c", x:285, y:205 },
+  a0b1c0: { id:"a0b1c0", label:"✗", x:245, y:300 },
+  a0b1c1: { id:"a0b1c1", label:"✗", x:325, y:300 },
+  a1: { id:"a1", label:"b", x:510, y:120 },
+  a1b0: { id:"a1b0", label:"✗", x:455, y:205 },
+  a1b1: { id:"a1b1", label:"c", x:575, y:205 },
+  a1b1c1: { id:"a1b1c1", label:"d", x:600, y:300 },
+  sat: { id:"sat", label:"SAT", x:600, y:375 },
+};
+
+const BASE_EDGES = {
+  a0: ["root","a0","0"],
+  a0b0: ["a0","a0b0","0"],
+  a0b0c0: ["a0b0","a0b0c0","0"],
+  a0b0c1: ["a0b0","a0b0c1","1"],
+  a0b1: ["a0","a0b1","1"],
+  a0b1c0: ["a0b1","a0b1c0","0"],
+  a0b1c1: ["a0b1","a0b1c1","1"],
+  a1: ["root","a1","1"],
+  a1b0: ["a1","a1b0","0"],
+  a1b1: ["a1","a1b1","1"],
+  a1b1c1: ["a1b1","a1b1c1","1"],
+  sat: ["a1b1c1","sat","1"],
+};
+
+function nodeList(ids, activeId, conflictIds = [], satIds = []) {
+  return ids.map(id => {
+    const n = { ...BASE_NODES[id] };
+    if (id === activeId) n.status = "active";
+    else if (conflictIds.includes(id)) n.status = "conflict";
+    else if (satIds.includes(id)) n.status = "sat";
+    else n.status = "normal";
+    return n;
+  });
+}
+
+function edgeList(ids) {
+  return ids.map(id => BASE_EDGES[id]).filter(Boolean);
+}
+
+const STEPS = [
+  {
+    desc: "Formula este în forma CNF. Demonstrația arată cum DPLL explorează ramurile, detectează conflictele și ajunge la o atribuire SAT.",
+    nodes: [], edges: [], activeClauses: [], conflictClauses: [], vars: {}, impl: null
+  },
+  {
+    desc: "Creăm rădăcina arborelui cu variabila de decizie <strong>a</strong>.",
+    nodes: nodeList(["root"], "root"), edges: [], activeClauses: [], conflictClauses: [], vars: {}, impl: null
+  },
+  {
+    desc: "Prima decizie: alegem <strong>a = 0</strong>. Deoarece a este fals, clauzele care conțin <strong>a</strong> devin mai restrictive.",
+    nodes: nodeList(["root","a0"], "a0"), edges: edgeList(["a0"]), activeClauses: [1,2,3,4], conflictClauses: [], vars: {a:{value:0,type:"decizie"}}, impl: null
+  },
+  {
+    desc: "Continuăm pe ramura stângă și alegem <strong>b = 0</strong>. Următorul nod de decizie este <strong>c</strong>.",
+    nodes: nodeList(["root","a0","a0b0"], "a0b0"), edges: edgeList(["a0","a0b0"]), activeClauses: [1,2,3,4], conflictClauses: [], vars: {a:{value:0,type:"decizie"}, b:{value:0,type:"decizie"}}, impl: null
+  },
+  {
+    desc: "Alegem <strong>c = 0</strong>. Apar două propagări opuse: clauza <strong>(a ∨ c ∨ d)</strong> forțează d=1, iar <strong>(a ∨ c ∨ ¬d)</strong> forțează d=0. Rezultă <strong>conflict</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0"], "a0b0c0", ["a0b0c0"]), edges: edgeList(["a0","a0b0","a0b0c0"]), activeClauses: [], conflictClauses: [1,2], vars: {a:{value:0,type:"decizie"}, b:{value:0,type:"decizie"}, c:{value:0,type:"decizie"}, d:{value:"0/1",type:"conflict"}}, impl: {
+      title: "Conflict: d este forțat simultan la 1 și 0",
+      nodes: [
+        {id:"a0",label:"a=0",x:65,y:70,type:"normal"},
+        {id:"c0",label:"c=0",x:185,y:70,type:"normal"},
+        {id:"d1",label:"d=1",x:340,y:42,type:"forced"},
+        {id:"d0",label:"d=0",x:340,y:100,type:"forced"},
+        {id:"conf",label:"Conflict",x:520,y:70,type:"conflict"},
+      ],
+      edges: [
+        {from:"a0",to:"d1",label:"(a ∨ c ∨ d)"},
+        {from:"c0",to:"d1",label:""},
+        {from:"a0",to:"d0",label:"(a ∨ c ∨ ¬d)"},
+        {from:"c0",to:"d0",label:""},
+        {from:"d1",to:"conf",label:"d=1"},
+        {from:"d0",to:"conf",label:"d=0"},
+      ]
+    }
+  },
+  {
+    desc: "Backtracking: încercăm valoarea opusă, <strong>c = 1</strong>. Acum clauzele <strong>(a ∨ ¬c ∨ d)</strong> și <strong>(a ∨ ¬c ∨ ¬d)</strong> forțează valori contradictorii pentru d.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1"], "a0b0c1", ["a0b0c0","a0b0c1"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1"]), activeClauses: [], conflictClauses: [3,4], vars: {a:{value:0,type:"decizie"}, b:{value:0,type:"decizie"}, c:{value:1,type:"decizie"}, d:{value:"0/1",type:"conflict"}}, impl: {
+      title: "Conflict: a=0 și c=1 duc la d=1 și d=0",
+      nodes: [
+        {id:"a0",label:"a=0",x:65,y:70,type:"normal"},
+        {id:"c1",label:"c=1",x:185,y:70,type:"normal"},
+        {id:"d1",label:"d=1",x:340,y:42,type:"forced"},
+        {id:"d0",label:"d=0",x:340,y:100,type:"forced"},
+        {id:"conf",label:"Conflict",x:520,y:70,type:"conflict"},
+      ],
+      edges: [
+        {from:"a0",to:"d1",label:"(a ∨ ¬c ∨ d)"},
+        {from:"c1",to:"d1",label:""},
+        {from:"a0",to:"d0",label:"(a ∨ ¬c ∨ ¬d)"},
+        {from:"c1",to:"d0",label:""},
+        {from:"d1",to:"conf",label:"d=1"},
+        {from:"d0",to:"conf",label:"d=0"},
+      ]
+    }
+  },
+  {
+    desc: "Am epuizat ramura b=0, deci revenim la b și încercăm <strong>b = 1</strong>. Alegem din nou variabila <strong>c</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1"], "a0b1", ["a0b0c0","a0b0c1"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1"]), activeClauses: [1,2,3,4], conflictClauses: [], vars: {a:{value:0,type:"decizie"}, b:{value:1,type:"decizie"}}, impl: null
+  },
+  {
+    desc: "Pe ramura a=0, b=1, alegem <strong>c = 0</strong>. Ca mai înainte, <strong>(a ∨ c ∨ d)</strong> și <strong>(a ∨ c ∨ ¬d)</strong> produc conflict.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0"], "a0b1c0", ["a0b0c0","a0b0c1","a0b1c0"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0"]), activeClauses: [], conflictClauses: [1,2], vars: {a:{value:0,type:"decizie"}, b:{value:1,type:"decizie"}, c:{value:0,type:"decizie"}, d:{value:"0/1",type:"conflict"}}, impl: null
+  },
+  {
+    desc: "Încercăm <strong>c = 1</strong>. Clauzele <strong>(a ∨ ¬c ∨ d)</strong> și <strong>(a ∨ ¬c ∨ ¬d)</strong> produc din nou conflict. Toată ramura a=0 este respinsă.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1"], "a0b1c1", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1"]), activeClauses: [], conflictClauses: [3,4], vars: {a:{value:0,type:"decizie"}, b:{value:1,type:"decizie"}, c:{value:1,type:"decizie"}, d:{value:"0/1",type:"conflict"}}, impl: null
+  },
+  {
+    desc: "Backtracking la rădăcină. Încercăm ramura opusă: <strong>a = 1</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1"], "a1", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1"]), activeClauses: [0,6,7], conflictClauses: [], vars: {a:{value:1,type:"decizie"}}, impl: null
+  },
+  {
+    desc: "Pe ramura a=1, alegem <strong>b = 0</strong>. Clauza <strong>(¬a ∨ b ∨ c)</strong> forțează c=1, iar <strong>(¬a ∨ b ∨ ¬c)</strong> forțează c=0. Apare conflict.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0"], "a1b0", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1","a1b0"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0"]), activeClauses: [], conflictClauses: [0,6], vars: {a:{value:1,type:"decizie"}, b:{value:0,type:"decizie"}, c:{value:"0/1",type:"conflict"}}, impl: {
+      title: "Conflict: c este forțat simultan la 1 și 0",
+      nodes: [
+        {id:"a1",label:"a=1",x:65,y:70,type:"normal"},
+        {id:"b0",label:"b=0",x:185,y:70,type:"normal"},
+        {id:"c1",label:"c=1",x:340,y:42,type:"forced"},
+        {id:"c0",label:"c=0",x:340,y:100,type:"forced"},
+        {id:"conf",label:"Conflict",x:520,y:70,type:"conflict"},
+      ],
+      edges: [
+        {from:"a1",to:"c1",label:"(¬a ∨ b ∨ c)"},
+        {from:"b0",to:"c1",label:""},
+        {from:"a1",to:"c0",label:"(¬a ∨ b ∨ ¬c)"},
+        {from:"b0",to:"c0",label:""},
+        {from:"c1",to:"conf",label:"c=1"},
+        {from:"c0",to:"conf",label:"c=0"},
+      ]
+    }
+  },
+  {
+    desc: "Backtracking la b. Alegem <strong>b = 1</strong>. Această ramură nu produce conflict imediat.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1"], "a1b1", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1","a1b0"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1"]), activeClauses: [7], conflictClauses: [], vars: {a:{value:1,type:"decizie"}, b:{value:1,type:"decizie"}}, impl: null
+  },
+  {
+    desc: "Decizie forțată: clauza <strong>(¬a ∨ ¬b ∨ c)</strong> devine unitară, deoarece a=1 și b=1. Rezultă <strong>c = 1</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1"], "a1b1c1", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1","a1b0"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1"]), activeClauses: [7], conflictClauses: [], vars: {a:{value:1,type:"decizie"}, b:{value:1,type:"decizie"}, c:{value:1,type:"forced"}}, impl: {
+      title: "Propagare: (¬a ∨ ¬b ∨ c) forțează c=1",
+      nodes: [
+        {id:"a1",label:"a=1",x:65,y:70,type:"normal"},
+        {id:"b1",label:"b=1",x:185,y:70,type:"normal"},
+        {id:"c1",label:"c=1",x:355,y:70,type:"forced"},
+      ],
+      edges: [
+        {from:"a1",to:"c1",label:"(¬a ∨ ¬b ∨ c)"},
+        {from:"b1",to:"c1",label:""},
+      ]
+    }
+  },
+  {
+    desc: "Altă propagare: cu b=1 și c=1, clauza <strong>(¬b ∨ ¬c ∨ d)</strong> devine unitară și forțează <strong>d = 1</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1"], "a1b1c1", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1","a1b0"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1"]), activeClauses: [5], conflictClauses: [], vars: {a:{value:1,type:"decizie"}, b:{value:1,type:"decizie"}, c:{value:1,type:"forced"}, d:{value:1,type:"forced"}}, impl: {
+      title: "Propagări finale: c=1 și d=1",
+      nodes: [
+        {id:"a1",label:"a=1",x:60,y:70,type:"normal"},
+        {id:"b1",label:"b=1",x:180,y:70,type:"normal"},
+        {id:"c1",label:"c=1",x:320,y:70,type:"forced"},
+        {id:"d1",label:"d=1",x:470,y:70,type:"forced"},
+      ],
+      edges: [
+        {from:"a1",to:"c1",label:"(¬a ∨ ¬b ∨ c)"},
+        {from:"b1",to:"c1",label:""},
+        {from:"b1",to:"d1",label:"(¬b ∨ ¬c ∨ d)"},
+        {from:"c1",to:"d1",label:""},
+      ]
+    }
+  },
+  {
+    desc: "Toate clauzele sunt satisfăcute. Soluția găsită este <strong>a=1, b=1, c=1, d=1</strong>. Formula este <strong>SAT</strong>.",
+    nodes: nodeList(["root","a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1","sat"], "sat", ["a0b0c0","a0b0c1","a0b1c0","a0b1c1","a1b0"], ["sat"]), edges: edgeList(["a0","a0b0","a0b0c0","a0b0c1","a0b1","a0b1c0","a0b1c1","a1","a1b0","a1b1","a1b1c1","sat"]), activeClauses: [0,1,2,3,4,5,6,7], conflictClauses: [], vars: {a:{value:1,type:"decizie"}, b:{value:1,type:"decizie"}, c:{value:1,type:"forced"}, d:{value:1,type:"forced"}}, impl: {
+      title: "Implication graph final",
+      nodes: [
+        {id:"a1",label:"a=1",x:60,y:70,type:"normal"},
+        {id:"b1",label:"b=1",x:180,y:70,type:"normal"},
+        {id:"c1",label:"c=1",x:320,y:70,type:"forced"},
+        {id:"d1",label:"d=1",x:470,y:70,type:"forced"},
+        {id:"sat",label:"SAT",x:620,y:70,type:"sat"},
+      ],
+      edges: [
+        {from:"a1",to:"c1",label:"(¬a ∨ ¬b ∨ c)"},
+        {from:"b1",to:"c1",label:""},
+        {from:"b1",to:"d1",label:"(¬b ∨ ¬c ∨ d)"},
+        {from:"c1",to:"d1",label:""},
+        {from:"c1",to:"sat",label:""},
+        {from:"d1",to:"sat",label:""},
+      ]
+    }
+  },
+];
+
+let currentStep = 0;
+let autoTimer = null;
+const TOTAL = STEPS.length - 1;
+const R = 19;
+
+function buildClauseList() {
+  const list = document.getElementById("clause-list");
+  list.innerHTML = "";
+  CLAUSES.forEach((cl, index) => {
+    const div = document.createElement("div");
+    div.className = "clause";
+    div.id = `clause-${cl.id}`;
+    div.innerHTML = `<strong>C${index + 1}</strong> ${cl.label}`;
+    div.title = cl.reason;
+    list.appendChild(div);
+  });
+}
+
+function highlightClauses(step) {
+  CLAUSES.forEach(cl => {
+    const el = document.getElementById(`clause-${cl.id}`);
+    el.className = "clause";
+    if (step.conflictClauses.includes(cl.id)) el.classList.add("conflict-clause");
+    else if (step.activeClauses.includes(cl.id)) {
+      if (step.nodes.some(n => n.status === "sat")) el.classList.add("sat-clause");
+      else el.classList.add("active");
+    }
+  });
+}
+
+function updateVarTable(vars) {
+  const table = document.getElementById("var-table");
+  const names = ["a","b","c","d"];
+  table.innerHTML = names.map(name => {
+    const v = vars[name];
+    if (!v) {
+      return `<div class="var-row"><span>${name}</span><span class="badge empty">—</span></div>`;
+    }
+    if (v.type === "conflict") {
+      return `<div class="var-row"><span>${name}</span><span class="badge zero">${v.value}</span></div>`;
+    }
+    const cls = v.value === 1 ? "one" : "zero";
+    const type = v.type === "forced" ? " forced" : "";
+    const label = v.type === "forced" ? `${v.value} · forced` : `${v.value}`;
+    return `<div class="var-row"><span>${name}</span><span class="badge ${cls}${type}">${label}</span></div>`;
+  }).join("");
+}
+
+function nodeColor(status) {
+  if (status === "conflict") return {fill:"#fee2e2", stroke:"#b91c1c", text:"#b91c1c"};
+  if (status === "sat") return {fill:"#dcfce7", stroke:"#15803d", text:"#15803d"};
+  if (status === "active") return {fill:"#fef3c7", stroke:"#d97706", text:"#92400e"};
+  return {fill:"#dbeafe", stroke:"#1d4ed8", text:"#1d4ed8"};
+}
+
+function drawTree(nodes, edges) {
+  const svg = document.getElementById("tree-svg");
+  if (!nodes.length) {
+    svg.setAttribute("viewBox", "0 0 680 390");
+    svg.innerHTML = `<text x="20" y="45" fill="#94a3b8" font-family="var(--font-mono)" font-size="16">Arborele va apărea aici pas cu pas.</text>`;
+    return;
+  }
+
+  const map = Object.fromEntries(nodes.map(n => [n.id, n]));
+  svg.setAttribute("viewBox", "0 0 680 405");
+  svg.setAttribute("width", "100%");
+  svg.setAttribute("height", "100%");
+
+  let out = `<defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#64748b" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrSat" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#15803d" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>`;
+
+  edges.forEach(([from, to, label]) => {
+    const a = map[from], b = map[to];
+    if (!a || !b) return;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.max(Math.sqrt(dx*dx + dy*dy), 1);
+    const sx = a.x + R * dx / dist;
+    const sy = a.y + R * dy / dist;
+    const ex = b.x - R * dx / dist;
+    const ey = b.y - R * dy / dist;
+    const satEdge = b.status === "sat";
+    const stroke = satEdge ? "#15803d" : "#64748b";
+    const marker = satEdge ? "arrSat" : "arr";
+    const mx = (sx + ex) / 2, my = (sy + ey) / 2;
+    out += `<line x1="${sx}" y1="${sy}" x2="${ex}" y2="${ey}" stroke="${stroke}" stroke-width="${satEdge ? 2.4 : 1.9}" marker-end="url(#${marker})"/>`;
+    out += `<circle cx="${mx}" cy="${my}" r="10" fill="#fff" stroke="${stroke}" stroke-width="1.3"/>`;
+    out += `<text x="${mx}" y="${my+1}" text-anchor="middle" dominant-baseline="middle" font-family="monospace" font-size="11" font-weight="700" fill="${stroke}">${label}</text>`;
+  });
+
+  nodes.forEach(n => {
+    const c = nodeColor(n.status);
+    const radius = n.status === "sat" ? 23 : R;
+    if (n.status === "active" || n.status === "sat") {
+      out += `<circle cx="${n.x}" cy="${n.y}" r="${radius + 5}" fill="${c.fill}" opacity=".45"/>`;
+    }
+    out += `<circle cx="${n.x}" cy="${n.y}" r="${radius}" fill="${c.fill}" stroke="${c.stroke}" stroke-width="2.4"/>`;
+    out += `<text x="${n.x}" y="${n.y+1}" text-anchor="middle" dominant-baseline="middle" font-family="monospace" font-size="${n.label === "SAT" ? 10 : 14}" font-weight="800" fill="${c.text}">${n.label}</text>`;
+  });
+
+  svg.innerHTML = out;
+}
+
+function implColor(type) {
+  if (type === "conflict") return {fill:"#fee2e2", stroke:"#b91c1c", text:"#b91c1c"};
+  if (type === "forced") return {fill:"#fef3c7", stroke:"#d97706", text:"#92400e"};
+  if (type === "sat") return {fill:"#dcfce7", stroke:"#15803d", text:"#15803d"};
+  return {fill:"#dbeafe", stroke:"#1d4ed8", text:"#1d4ed8"};
+}
+
+function drawImpl(data) {
+  const svg = document.getElementById("impl-svg");
+  svg.setAttribute("viewBox", "0 0 850 170");
+
+  if (!data) {
+    svg.innerHTML = `<text x="18" y="78" fill="#94a3b8" font-family="monospace" font-size="13">
+      Implication graph-ul apare când există propagare sau conflict.
+    </text>`;
+    return;
+  }
+
+  const title = data.title || "";
+  const labels = (data.edges || []).map(e => e.label).filter(Boolean);
+
+  const marker = `<defs>
+    <marker id="arrowImpl" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#475569" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>`;
+
+  function color(type) {
+    if (type === "conflict") return {fill:"#fee2e2", stroke:"#b91c1c", text:"#b91c1c"};
+    if (type === "forced") return {fill:"#fef3c7", stroke:"#d97706", text:"#92400e"};
+    if (type === "sat") return {fill:"#dcfce7", stroke:"#15803d", text:"#15803d"};
+    if (type === "clause") return {fill:"#ffffff", stroke:"#cbd5e1", text:"#334155"};
+    return {fill:"#dbeafe", stroke:"#1d4ed8", text:"#1d4ed8"};
+  }
+
+  function node(x, y, text, type="normal", rx=38, ry=23) {
+    const c = color(type);
+    return `<ellipse cx="${x}" cy="${y}" rx="${rx}" ry="${ry}" fill="${c.fill}" stroke="${c.stroke}" stroke-width="2.3"/>
+      <text x="${x}" y="${y+1}" text-anchor="middle" dominant-baseline="middle"
+        font-family="monospace" font-size="12" font-weight="800" fill="${c.text}">${text}</text>`;
+  }
+
+  function clause(x, y, text) {
+    const w = Math.max(108, text.length * 7.3);
+    const c = color("clause");
+    return `<rect x="${x-w/2}" y="${y-14}" width="${w}" height="28" rx="9" fill="${c.fill}" stroke="${c.stroke}" stroke-width="1.4"/>
+      <text x="${x}" y="${y+1}" text-anchor="middle" dominant-baseline="middle"
+        font-family="monospace" font-size="11" font-weight="700" fill="${c.text}">${text}</text>`;
+  }
+
+  function line(x1, y1, x2, y2) {
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#475569" stroke-width="1.8" marker-end="url(#arrowImpl)"/>`;
+  }
+
+  function softLine(x1, y1, x2, y2) {
+    return `<path d="M ${x1} ${y1} C ${(x1+x2)/2} ${y1}, ${(x1+x2)/2} ${y2}, ${x2} ${y2}"
+      stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#arrowImpl)"/>`;
+  }
+
+  let out = marker;
+  out += `<text x="18" y="22" fill="#667085" font-family="system-ui" font-size="12" font-weight="800">${title}</text>`;
+
+  const firstNode = data.nodes?.[0]?.label || "";
+  const secondNode = data.nodes?.[1]?.label || "";
+
+  // Caz 1: conflict cu două valori forțate opuse.
+  if (title.includes("Conflict")) {
+    const forced1 = data.nodes?.find(n => n.label.includes("=1") && n.type === "forced")?.label || "x=1";
+    const forced0 = data.nodes?.find(n => n.label.includes("=0") && n.type === "forced")?.label || "x=0";
+    const clauseTop = labels[0] || "clauză 1";
+    const clauseBottom = labels[1] || "clauză 2";
+
+    out += node(82, 95, firstNode, "normal");
+    out += node(215, 95, secondNode, "normal");
+
+    out += clause(365, 63, clauseTop);
+    out += clause(365, 128, clauseBottom);
+
+    out += node(535, 63, forced1, "forced");
+    out += node(535, 128, forced0, "forced");
+    out += node(720, 95, "Conflict", "conflict", 54, 26);
+
+    // Intrări spre clauze
+    out += softLine(118, 89, 310, 63);
+    out += softLine(250, 89, 310, 63);
+    out += softLine(118, 101, 310, 128);
+    out += softLine(250, 101, 310, 128);
+
+    // Clauze spre valori forțate
+    out += line(420, 63, 495, 63);
+    out += line(420, 128, 495, 128);
+
+    // Valori opuse spre conflict
+    out += softLine(575, 63, 668, 88);
+    out += softLine(575, 128, 668, 102);
+
+    return svg.innerHTML = out;
+  }
+
+  // Caz 2: propagare simplă c=1.
+  if (title.includes("Propagare:")) {
+    const forced = data.nodes?.find(n => n.type === "forced")?.label || "c=1";
+    const clauseLabel = labels[0] || "clauză";
+
+    out += node(95, 95, firstNode, "normal");
+    out += node(235, 95, secondNode, "normal");
+    out += clause(405, 95, clauseLabel);
+    out += node(585, 95, forced, "forced");
+
+    // Rute separate ca să nu treacă săgeata prin nodul b=1.
+    out += `<path d="M 132 88 C 210 38, 310 45, 345 82"
+      stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#arrowImpl)"/>`;
+    out += `<path d="M 272 102 C 310 112, 328 110, 345 104"
+      stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#arrowImpl)"/>`;
+    out += line(462, 95, 545, 95);
+
+    return svg.innerHTML = out;
+  }
+
+  // Caz 3: propagări finale sau graful final.
+  const isFinal = title.includes("final");
+  out += node(75, 95, "a=1", "normal");
+  out += node(195, 95, "b=1", "normal");
+  out += clause(345, 65, "(¬a ∨ ¬b ∨ c)");
+  out += node(500, 65, "c=1", "forced");
+  out += clause(345, 128, "(¬b ∨ ¬c ∨ d)");
+  out += node(500, 128, "d=1", "forced");
+
+  out += `<path d="M 112 88 C 185 34, 250 36, 285 58"
+    stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#arrowImpl)"/>`;
+  out += `<path d="M 232 88 C 258 72, 270 66, 285 65"
+    stroke="#475569" stroke-width="1.8" fill="none" marker-end="url(#arrowImpl)"/>`;
+  out += line(405, 65, 460, 65);
+
+  out += softLine(232, 101, 285, 128);
+  out += softLine(500, 88, 405, 128);
+  out += line(405, 128, 460, 128);
+
+  if (isFinal) {
+    out += node(685, 95, "SAT", "sat", 42, 24);
+    out += softLine(540, 65, 645, 88);
+    out += softLine(540, 128, 645, 102);
+  }
+
+  svg.innerHTML = out;
+}
+
+function renderStep(index) {
+  const step = STEPS[index];
+  document.getElementById("step-desc").innerHTML = step.desc;
+  document.getElementById("step-counter").textContent = `Pas ${index} / ${TOTAL}`;
+  highlightClauses(step);
+  updateVarTable(step.vars);
+  drawTree(step.nodes, step.edges);
+  drawImpl(step.impl);
+
+  document.getElementById("btn-prev").disabled = index === 0;
+  document.getElementById("btn-next").disabled = index === TOTAL;
+}
+
+function stopAuto() {
+  if (autoTimer) clearInterval(autoTimer);
+  autoTimer = null;
+  document.getElementById("btn-auto").textContent = "▶ Auto play";
+}
+
+document.getElementById("btn-next").addEventListener("click", () => {
+  if (currentStep < TOTAL) {
+    currentStep++;
+    renderStep(currentStep);
+  }
+});
+
+document.getElementById("btn-prev").addEventListener("click", () => {
+  if (currentStep > 0) {
+    currentStep--;
+    renderStep(currentStep);
+  }
+});
+
+document.getElementById("btn-reset").addEventListener("click", () => {
+  stopAuto();
+  currentStep = 0;
+  renderStep(currentStep);
+});
+
+document.getElementById("btn-auto").addEventListener("click", () => {
+  if (autoTimer) {
+    stopAuto();
+    return;
+  }
+  document.getElementById("btn-auto").textContent = "⏸ Stop auto";
+  autoTimer = setInterval(() => {
+    if (currentStep < TOTAL) {
+      currentStep++;
+      renderStep(currentStep);
+    } else {
+      stopAuto();
+    }
+  }, 1800);
+});
+
+buildClauseList();
+renderStep(0);
+</script>
+</body>
+</html>

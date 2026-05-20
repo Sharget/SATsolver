@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1.0" />
+<title>WalkSAT Visualizer — clean</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#f4f6fb; --panel:#fff; --soft:#f8fafc; --border:#d8dde8;
+    --text:#182033; --muted:#667085;
+    --blue-bg:#dbeafe; --blue:#1d4ed8;
+    --red-bg:#fee2e2; --red:#b91c1c;
+    --green-bg:#dcfce7; --green:#15803d;
+    --yellow-bg:#fef3c7; --yellow:#b45309;
+    --orange-bg:#ffedd5; --orange:#c2410c;
+    --purple-bg:#ede9fe; --purple:#7c3aed;
+    --shadow:0 10px 25px rgba(15,23,42,.08);
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    --ui:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  html, body { height:100%; }
+  body {
+    height:100vh; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:var(--ui); display:flex; flex-direction:column;
+  }
+  header {
+    height:66px; flex-shrink:0; display:flex; align-items:center; gap:12px;
+    padding:14px 28px; background:var(--panel); border-bottom:1px solid var(--border);
+    box-shadow:0 2px 10px rgba(15,23,42,.04);
+  }
+  header h1 { font-size:24px; }
+  .tag {
+    font-family:var(--mono); font-size:11px; border-radius:999px; padding:4px 9px;
+    background:var(--blue-bg); color:var(--blue); border:1px solid rgba(29,78,216,.18);
+  }
+  .app {
+    height:calc(100vh - 66px - 34px); min-height:0;
+    display:grid; grid-template-columns:320px minmax(0,1fr);
+    grid-template-rows:82px minmax(0,1fr) 230px;
+  }
+  .sidebar {
+    grid-row:1/4; background:var(--panel); border-right:1px solid var(--border);
+    padding:14px; overflow:auto;
+  }
+  .topbar {
+    background:var(--panel); border-bottom:1px solid var(--border);
+    padding:10px 16px; display:grid; grid-template-columns:minmax(0,1fr) auto;
+    gap:12px; align-items:center;
+  }
+  .step-box { font-size:13px; line-height:1.45; min-width:0; }
+  .step-box strong { color:var(--blue); }
+  .step-box code, .note code {
+    font-family:var(--mono); background:#eef2ff; border:1px solid #c7d2fe;
+    color:#1e40af; padding:1px 4px; border-radius:5px;
+  }
+  .controls {
+    display:grid; grid-template-columns:repeat(4,auto) auto; gap:7px; align-items:center;
+    background:var(--soft); border:1px solid var(--border); border-radius:12px; padding:7px;
+  }
+  button {
+    border:1.5px solid var(--border); background:var(--panel); color:var(--text);
+    padding:7px 10px; border-radius:9px; font-weight:650; font-size:12px; cursor:pointer;
+    white-space:nowrap;
+  }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:var(--blue); color:white; border-color:var(--blue); }
+  button.danger { color:var(--red); border-color:#fecaca; }
+  .step-counter { color:var(--muted); font-family:var(--mono); font-size:11px; white-space:nowrap; }
+  .main { padding:14px 16px; overflow:auto; min-height:0; }
+  .bottom { background:var(--panel); border-top:1px solid var(--border); padding:10px 16px; overflow:auto; }
+  .section-title {
+    color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.8px;
+    font-weight:800; margin-bottom:7px;
+  }
+  .side-block { margin-top:13px; padding-top:11px; border-top:1px solid var(--border); }
+  .note { font-size:13px; line-height:1.55; color:var(--muted); }
+  .clauses, .stack { display:flex; flex-direction:column; gap:6px; }
+  .clause, .box, .metric {
+    font-family:var(--mono); font-size:11px; line-height:1.4; padding:8px 10px;
+    border-radius:9px; background:#fafafa; border:1.5px solid var(--border);
+  }
+  .clause.true { background:var(--green-bg); border-color:#22c55e; color:#14532d; }
+  .clause.false { background:var(--red-bg); border-color:#ef4444; color:#7f1d1d; }
+  .clause.chosen { outline:3px solid rgba(245,158,11,.45); border-color:#f59e0b; }
+  .clause.touched { box-shadow:0 0 0 4px rgba(251,146,60,.18); }
+  .lit.ok { font-weight:900; color:var(--green); }
+  .lit.bad { color:#94a3b8; }
+  .clause-status { float:right; color:var(--muted); font-size:10px; }
+  .workspace { display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:14px; align-items:start; }
+  .board { min-width:0; }
+  .right { display:flex; flex-direction:column; gap:9px; position:sticky; top:0; }
+  .card {
+    background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    box-shadow:var(--shadow); padding:10px;
+  }
+  .vars {
+    display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:12px;
+  }
+  .var-card {
+    background:var(--panel); border:1.5px solid var(--border); border-radius:14px;
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .var-card.candidate { border-color:#60a5fa; }
+  .var-card.flip { border-color:#f59e0b; box-shadow:0 0 0 4px rgba(245,158,11,.18), var(--shadow); }
+  .var-head {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 10px; background:var(--soft); border-bottom:1px solid var(--border);
+    font-family:var(--mono); font-weight:900;
+  }
+  .value { font-family:var(--mono); font-weight:900; font-size:18px; text-align:center; padding:14px; }
+  .value.one { background:var(--green-bg); color:var(--green); }
+  .value.zero { background:var(--red-bg); color:var(--red); }
+  .var-note { font-size:12px; color:var(--muted); padding:8px 10px 10px; line-height:1.35; }
+  .badge {
+    border-radius:999px; padding:2px 7px; font-size:10px; font-family:var(--mono); font-weight:900;
+  }
+  .badge.candidate { background:var(--blue-bg); color:var(--blue); }
+  .badge.flip { background:var(--yellow-bg); color:var(--yellow); }
+  .badge.random { background:var(--purple-bg); color:var(--purple); }
+  .badge.greedy { background:var(--green-bg); color:var(--green); }
+  .metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+  .metric strong { display:block; font-size:13px; }
+  .metric span { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
+  table { width:100%; border-collapse:collapse; font-family:var(--mono); font-size:11px; }
+  th, td { border:1px solid var(--border); padding:5px 7px; text-align:left; }
+  th { background:var(--soft); color:var(--muted); font-size:10px; text-transform:uppercase; }
+  tr.best { background:var(--green-bg); }
+  tr.chosen { outline:2px solid #f59e0b; background:var(--yellow-bg); }
+  .branch-banner {
+    display:none; margin-bottom:12px; border:2px solid #8b5cf6; background:var(--purple-bg);
+    color:var(--purple); border-radius:14px; padding:11px 13px; box-shadow:var(--shadow);
+    font-size:13px; line-height:1.45;
+  }
+  .branch-banner.visible { display:block; }
+  .bad-branch-banner {
+    border-color:#ef4444;
+    background:var(--red-bg);
+    color:var(--red);
+  }
+  .branch-banner strong { display:block; font-size:15px; margin-bottom:2px; }
+
+  .branch-trace {
+    margin-bottom: 12px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .branch-card {
+    position: relative;
+    min-height: 76px;
+    padding: 10px 11px;
+    border-radius: 14px;
+    border: 1.5px solid var(--border);
+    background: rgba(255,255,255,.62);
+    box-shadow: 0 8px 18px rgba(15,23,42,.05);
+    opacity: .43;
+    filter: saturate(.65);
+  }
+
+  .branch-card.active {
+    opacity: 1;
+    filter: saturate(1);
+    box-shadow: 0 0 0 4px rgba(29,78,216,.12), var(--shadow);
+    border-color: #60a5fa;
+    background: var(--blue-bg);
+  }
+
+  .branch-card.done {
+    opacity: .72;
+    border-color: #22c55e;
+    background: rgba(220,252,231,.62);
+  }
+
+  .branch-card.fail.active {
+    border-color: #ef4444;
+    background: var(--red-bg);
+    box-shadow: 0 0 0 4px rgba(239,68,68,.12), var(--shadow);
+  }
+
+  .branch-card .branch-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    margin-bottom: 4px;
+  }
+
+  .branch-card .branch-text {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+
+  .branch-card::after {
+    content: "→";
+    position: absolute;
+    top: 25px;
+    right: -11px;
+    color: var(--muted);
+    font-weight: 900;
+  }
+
+  .branch-card:last-child::after {
+    content: "";
+  }
+  .bottom-grid { display:grid; grid-template-columns:.9fr 1.1fr; gap:12px; }
+  .bottom-card {
+    background:var(--soft); border:1px solid var(--border); border-radius:12px;
+    padding:9px 10px; min-height:150px;
+  }
+  .bottom-card.sat-highlight {
+    border:2px solid #8b5cf6;
+    background:var(--purple-bg);
+    color:var(--purple);
+    box-shadow:var(--shadow);
+  }
+  .bottom-card.sat-highlight .bottom-title { color:var(--purple); }
+  .bottom-title {
+    font-size:12px; font-weight:900; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.6px; margin-bottom:6px;
+  }
+  .chain { font-family:var(--mono); font-size:12px; line-height:1.7; }
+  .legend {
+    height:34px; display:flex; gap:13px; align-items:center; padding:6px 22px;
+    background:var(--panel); border-top:1px solid var(--border); font-size:12px; flex-shrink:0;
+    overflow:hidden;
+  }
+  .legend-item { display:inline-flex; align-items:center; gap:6px; }
+  .dot { width:13px; height:13px; border-radius:50%; border:1.5px solid transparent; }
+  .g { background:var(--green-bg); border-color:var(--green); }
+  .r { background:var(--red-bg); border-color:var(--red); }
+  .o { background:var(--orange-bg); border-color:var(--orange); }
+  .p { background:var(--purple-bg); border-color:var(--purple); }
+  .b { background:var(--blue-bg); border-color:var(--blue); }
+
+  @media (max-width:1350px) {
+    .app { grid-template-columns:285px minmax(0,1fr); }
+    .workspace { grid-template-columns:minmax(0,1fr) 320px; }
+    .vars { grid-template-columns:repeat(2,minmax(150px,1fr)); }
+    .controls { grid-template-columns:repeat(2,auto) auto; }
+  }
+  @media (max-width:1000px) {
+    body { height:auto; overflow:auto; }
+    .app { height:auto; grid-template-columns:1fr; grid-template-rows:auto auto auto auto; }
+    .sidebar { grid-row:auto; border-right:none; border-bottom:1px solid var(--border); }
+    .topbar { grid-template-columns:1fr; }
+    .workspace, .bottom-grid { grid-template-columns:1fr; }
+    .right { position:static; }
+    .vars { grid-template-columns:1fr; }
+    .legend { height:auto; flex-wrap:wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vizualizator WalkSAT</h1>
+  <span class="tag">local search</span>
+  <span class="tag" style="background:var(--purple-bg);color:var(--purple)">noise</span>
+  <span class="tag" style="background:var(--green-bg);color:var(--green)">greedy repair</span>
+</header>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="section-title">Formula CNF</div>
+    <div class="clauses" id="clause-list"></div>
+
+    <div class="side-block">
+      <div class="section-title">Assignment curent</div>
+      <div class="stack" id="assignment-compact"></div>
+    </div>
+
+    <div class="side-block">
+      <div class="section-title">Idee cheie</div>
+      <p class="note">
+        Culoarea clauzelor este recalculată la fiecare pas pe baza assignment-ului curent.
+        <code>lit. adevărați: 0/2</code> înseamnă că niciun literal nu este adevărat, deci clauza este falsă.
+      </p>
+    </div>
+  </aside>
+
+  <section class="topbar">
+    <div class="step-box" id="step-desc"></div>
+    <div class="controls">
+      <button id="btn-prev">← Pas anterior</button>
+      <button id="btn-next" class="primary">Pas următor →</button>
+      <button id="btn-auto">▶ Auto play</button>
+      <button id="btn-reset" class="danger">↺ Reset</button>
+      <span class="step-counter" id="step-counter"></span>
+    </div>
+  </section>
+
+  <main class="main">
+    <div class="workspace">
+      <section class="board">
+        <div class="branch-trace" id="branch-trace"></div>
+        <div class="branch-banner" id="branch-banner">
+          <strong>Ramură alternativă cu soluție</strong>
+          Revenim la momentul alegerii din <code>C1</code>. Ramura greedy ar fi ales <code>a</code> și s-ar fi terminat rapid cu SAT.
+          Aici arătăm ce se întâmplă dacă noise-ul alege random <code>b</code>.
+        </div>
+        <div class="branch-banner bad-branch-banner" id="bad-branch-banner">
+          <strong>Ramură fără soluție în buget</strong>
+          Revenim din nou la aceeași zonă, dar presupunem că solverul face o alegere mai slabă.
+          Formula poate fi SAT, dar această rulare locală se oprește înainte să găsească soluția.
+        </div>
+        <div class="section-title">Variabile / assignment complet</div>
+        <div class="vars" id="vars"></div>
+      </section>
+
+      <aside class="right">
+        <section class="card">
+          <div class="section-title">Alegerea flip-ului</div>
+          <div id="choice-panel"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">Clauze importante</div>
+          <div class="stack" id="source-list"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-title">Metrici WalkSAT</div>
+          <div class="metrics" id="metrics"></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <section class="bottom">
+    <div class="section-title">Explicație</div>
+    <div class="bottom-grid">
+      <div class="bottom-card">
+        <div class="bottom-title">Loop WalkSAT</div>
+        <div class="chain" id="loop"></div>
+      </div>
+      <div class="bottom-card" id="concept-card">
+        <div class="bottom-title">Concept important</div>
+        <div class="chain" id="concept"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="legend">
+  <strong style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.7px">Legendă:</strong>
+  <span class="legend-item"><span class="dot g"></span>clauză satisfăcută</span>
+  <span class="legend-item"><span class="dot r"></span>clauză nesatisfăcută</span>
+  <span class="legend-item"><span class="dot o"></span>clauză aleasă / variabilă flip</span>
+  <span class="legend-item"><span class="dot p"></span>ramură alternativă / random</span>
+  <span class="legend-item"><span class="dot b"></span>candidat</span>
+</div>
+
+<script>
+const VARS = [
+  {name:"a", id:1},
+  {name:"b", id:2},
+  {name:"c", id:3},
+  {name:"d", id:4}
+];
+
+const CLAUSES = [
+  {id:"C1", lits:[1,2], label:"(a ∨ b)"},
+  {id:"C2", lits:[-1,3], label:"(¬a ∨ c)"},
+  {id:"C3", lits:[-2,-3], label:"(¬b ∨ ¬c)"},
+  {id:"C4", lits:[1,-3], label:"(a ∨ ¬c)"}
+];
+
+const idToName = Object.fromEntries(VARS.map(v => [v.id, v.name]));
+
+function litName(lit) {
+  const n = idToName[Math.abs(lit)];
+  return lit < 0 ? "¬" + n : n;
+}
+
+function litValue(lit, a) {
+  const v = a[idToName[Math.abs(lit)]];
+  return lit > 0 ? v : !v;
+}
+
+function clauseInfo(clause, a) {
+  const values = clause.lits.map(lit => ({lit, ok: litValue(lit,a)}));
+  const trueCount = values.filter(x => x.ok).length;
+  return {values, trueCount, sat:trueCount > 0};
+}
+
+function unsatClauses(a) {
+  return CLAUSES.filter(c => !clauseInfo(c,a).sat);
+}
+
+function flip(a, v) {
+  const b = {...a};
+  b[v] = !b[v];
+  return b;
+}
+
+function score(a, v) {
+  const beforeUnsat = unsatClauses(a).length;
+  const after = flip(a,v);
+  const afterUnsat = unsatClauses(after).length;
+  let make = 0, brk = 0;
+  CLAUSES.forEach(c => {
+    const before = clauseInfo(c,a).sat;
+    const afterSat = clauseInfo(c,after).sat;
+    if (!before && afterSat) make++;
+    if (before && !afterSat) brk++;
+  });
+  return {make, break:brk, afterUnsat, beforeUnsat};
+}
+
+const STEPS = [
+  {
+    desc:"WalkSAT pornește cu o atribuire completă aleatoare: toate variabilele au deja valori.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:null, candidates:[], flipVar:null, mode:null, branch:false,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["Assignment random","a=0, b=0, c=1, d=0"]
+    ],
+    loop:["1. Generează assignment random.", "2. Calculează clauzele nesatisfăcute.", "3. Dacă nu există clauze false, returnează SAT."],
+    concept:["WalkSAT nu are niveluri de decizie ca DPLL/CDCL.", "El mută un punct prin spațiul tuturor assignment-urilor."]
+  },
+  {
+    desc:"Se evaluează formula. <code>C1</code> și <code>C4</code> sunt nesatisfăcute, deci WalkSAT trebuie să repare una dintre ele.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:null, candidates:[], flipVar:null, mode:null, branch:false,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["C1 este falsă","a=0 și b=0 fac (a ∨ b) falsă."],
+      ["C4 este falsă","a=0 și c=1 fac (a ∨ ¬c) falsă."]
+    ],
+    loop:["find unsatisfied clauses", "unsatisfied = {C1, C4}", "alege una dintre ele"],
+    concept:["O clauză este SAT dacă are cel puțin un literal adevărat.", "Dacă are 0 literali adevărați, este UNSAT."]
+  },
+  {
+    desc:"WalkSAT alege aleator o clauză nesatisfăcută. În demonstrație alegem <code>C1=(a ∨ b)</code>.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:"C1", candidates:["a","b"], flipVar:null, mode:"preview", branch:false,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["Clauză aleasă: C1","Candidații pentru flip sunt variabilele din C1: a sau b."]
+    ],
+    loop:["pick random unsatisfied clause", "chosen = C1", "candidate variables = {a,b}"],
+    concept:["Alegerea clauzei este random.", "Apoi solverul decide ce variabilă din clauză va fi flipată."]
+  },
+  {
+    desc:"Se calculează scorul candidaților. <code>flip(a)</code> duce direct la 0 clauze nesatisfăcute, iar <code>flip(b)</code> lasă 1 clauză nesatisfăcută.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:"C1", candidates:["a","b"], flipVar:null, mode:"preview", branch:false,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["a este greedy-best","flip(a) repară C1 și C4."],
+      ["b este posibil, dar mai slab","flip(b) repară C1, dar C4 rămâne falsă."]
+    ],
+    loop:["calculează score pentru a", "calculează score pentru b", "alege greedy sau random în funcție de noise"],
+    concept:["make = câte clauze false devin adevărate.", "break = câte clauze adevărate devin false."]
+  },
+  {
+    desc:"Ramura greedy: WalkSAT alege <code>a</code>, pentru că este candidatul cu scorul cel mai bun.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:"C1", candidates:["a","b"], flipVar:"a", mode:"greedy", branch:false,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["Flip ales: a","După flip(a), unsatisfied_count va deveni 0."]
+    ],
+    loop:["mode = greedy repair", "chosen variable = a", "urmează flip(a)"],
+    concept:["Aceasta este ramura principală, greedy.", "După următorul pas formula va fi SAT."]
+  },
+  {
+    desc:"După <code>flip(a)</code>, toate clauzele sunt satisfăcute. Aceasta este soluția rapidă de pe ramura greedy.",
+    a:{a:true,b:false,c:true,d:false},
+    chosen:null, candidates:[], flipVar:"a", mode:"greedy", branch:false,
+    m:{try:1, flips:1, unsat:0, best:0, noise:"0.50", status:"SAT"},
+    sources:[
+      ["SAT găsit","Nu mai există clauze nesatisfăcute."],
+      ["Soluție","a=1, b=0, c=1, d=0"]
+    ],
+    loop:["flip(a)", "unsatisfied_count = 0", "return SAT"],
+    concept:["Într-o rulare reală solverul s-ar opri aici.", "Următoarele pași arată o ramură alternativă pentru explicație."]
+  },
+  {
+    desc:"<strong>RAMURĂ ALTERNATIVĂ.</strong> Revenim la pasul cu <code>C1</code>. De data aceasta presupunem că noise-ul alege random <code>b</code> în loc de <code>a</code>.",
+    a:{a:false,b:false,c:true,d:false},
+    chosen:"C1", candidates:["a","b"], flipVar:"b", mode:"random", branch:true,
+    m:{try:1, flips:0, unsat:2, best:2, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["Flip random: b","Aceasta nu continuă după SAT; este un traseu alternativ posibil."]
+    ],
+    loop:["revenim mental la C1", "mode = random walk", "chosen variable = b"],
+    concept:["Noise permite alegeri non-greedy.", "Asta poate ajuta în probleme unde greedy-ul se blochează."]
+  },
+  {
+    desc:"După <code>flip(b)</code>, C1 devine satisfăcută, dar C4 rămâne nesatisfăcută. WalkSAT continuă.",
+    a:{a:false,b:true,c:true,d:false},
+    chosen:"C4", candidates:[], flipVar:"b", mode:"random", branch:true,
+    m:{try:1, flips:1, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["C1 reparată","b=1 face (a ∨ b) adevărată."],
+      ["C4 încă falsă","a=0 și c=1 fac (a ∨ ¬c) falsă."]
+    ],
+    loop:["flip(b)", "unsatisfied_count: 2 → 1", "alege următoarea clauză falsă: C4"],
+    concept:["Un flip random poate îmbunătăți formula, chiar dacă nu este cel mai bun."]
+  },
+  {
+    desc:"Pentru C4, candidații sunt <code>a</code> și <code>c</code>. Aici <code>c</code> este varianta bună: <code>flip(c)</code> duce la 0 clauze nesatisfăcute. <code>flip(a)</code> ar lăsa C3 falsă.",
+    a:{a:false,b:true,c:true,d:false},
+    chosen:"C4", candidates:["a","c"], flipVar:null, mode:"preview", branch:true,
+    m:{try:1, flips:1, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["c este greedy-best","flip(c) repară C4 și nu strică celelalte clauze."],
+      ["a nu rezolvă complet","flip(a) repară C4, dar C3 rămâne falsă când b=1 și c=1."]
+    ],
+    loop:["chosen = C4", "candidate variables = {a,c}", "calculează make/break"],
+    concept:["Aici se vede clar diferența între make și break.", "Greedy alege variabila care lasă cele mai puține clauze false după flip."]
+  },
+  {
+    desc:"WalkSAT alege <code>c</code>, face flip și ajunge la SAT pe ramura alternativă.",
+    a:{a:false,b:true,c:false,d:false},
+    chosen:null, candidates:[], flipVar:"c", mode:"greedy", branch:true,
+    m:{try:1, flips:2, unsat:0, best:0, noise:"0.50", status:"SAT"},
+    sources:[
+      ["SAT găsit pe ramura alternativă","Nu mai există clauze nesatisfăcute."],
+      ["Soluție alternativă","a=0, b=1, c=0, d=0"]
+    ],
+    loop:["flip(c)", "unsatisfied_count = 0", "return SAT"],
+    concept:["WalkSAT poate găsi soluții diferite în rulări diferite.", "Aici ramura alternativă chiar este SAT: toate clauzele sunt verzi."]
+  },
+  {
+    desc:"<strong>A DOUA RAMURĂ ALTERNATIVĂ.</strong> Revenim la momentul în care avem <code>a=0, b=1, c=1</code> și clauza falsă este <code>C4=(a ∨ ¬c)</code>. De data aceasta noise-ul alege <code>a</code>.",
+    a:{a:false,b:true,c:true,d:false},
+    chosen:"C4", candidates:["a","c"], flipVar:"a", mode:"random", branch:true, badBranch:true,
+    m:{try:2, flips:1, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["Alegere random: a","Alegerea pare bună pentru C4, dar poate strica C3."],
+      ["Scopul ramurii","Arătăm că o rulare locală poate să nu ajungă la soluție imediat."]
+    ],
+    loop:["revenim la C4", "mode = random walk", "chosen variable = a"],
+    concept:["Aceasta este o ramură demonstrativă separată.", "Nu este continuarea după SAT; este alt traseu posibil al aceleiași metode."]
+  },
+  {
+    desc:"După <code>flip(a)</code>, C4 devine satisfăcută, dar <code>C3=(¬b ∨ ¬c)</code> rămâne falsă deoarece <code>b=1</code> și <code>c=1</code>.",
+    a:{a:true,b:true,c:true,d:false},
+    chosen:"C3", candidates:[], flipVar:"a", mode:"random", branch:true, badBranch:true,
+    m:{try:2, flips:2, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["C4 reparată","a=1 face C4 adevărată."],
+      ["C3 falsă","b=1 și c=1 fac ¬b=false și ¬c=false."]
+    ],
+    loop:["flip(a)", "C4 devine SAT", "C3 rămâne UNSAT"],
+    concept:["Un flip poate repara o clauză, dar formula poate rămâne nesatisfăcută.", "WalkSAT continuă să repare local clauzele false."]
+  },
+  {
+    desc:"Solverul încearcă să repare <code>C3</code>. Dacă alege <code>b</code>, atunci <code>b</code> devine 0, dar poate reapărea problema cu C1.",
+    a:{a:true,b:true,c:true,d:false},
+    chosen:"C3", candidates:["b","c"], flipVar:"b", mode:"random", branch:true, badBranch:true,
+    m:{try:2, flips:2, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["C3 aleasă","Candidații sunt b și c."],
+      ["Alegere mai slabă","Aici alegem b ca să arătăm o mișcare care nu finalizează rapid."]
+    ],
+    loop:["chosen = C3", "candidate variables = {b,c}", "noise alege b"],
+    concept:["În local search, solverul poate oscila între zone apropiate.", "De aceea restarturile și noise-ul sunt importante."]
+  },
+  {
+    desc:"Presupunem că solverul nu apucă să facă flip-ul salvator. Rămâne blocat cu <code>C3</code> falsă până se termină bugetul foarte mic al demonstrației.",
+    a:{a:true,b:true,c:true,d:false},
+    chosen:"C3", candidates:["b","c"], flipVar:null, mode:"stuck", branch:true, badBranch:true,
+    m:{try:2, flips:2, unsat:1, best:1, noise:"0.50", status:"RUNNING"},
+    sources:[
+      ["C3 încă falsă","b=1 și c=1 fac C3 falsă."],
+      ["Buget mic","Într-o rulare reală, cu mai multe flip-uri, solverul ar putea găsi SAT."]
+    ],
+    loop:["C3 rămâne UNSAT", "nu mai avem flip-uri în bugetul demonstrativ", "urmează UNKNOWN"],
+    concept:["Această ramură arată un eșec de căutare, nu o contradicție logică.", "Formula rămâne SAT, dar această rulare nu a găsit soluția."]
+  },
+  {
+    desc:"Variantă didactică de buget mic: dacă oprim solverul înainte de flip-ul salvator, el ar returna <code>UNKNOWN</code>. Asta nu înseamnă UNSAT; înseamnă doar că această rulare nu a găsit soluția în buget.",
+    a:{a:true,b:true,c:true,d:false},
+    chosen:"C3", candidates:["b","c"], flipVar:null, mode:null, branch:true, badBranch:true,
+    m:{try:2, flips:2, unsat:1, best:1, noise:"0.50", status:"UNKNOWN"},
+    sources:[
+      ["UNKNOWN demonstrativ","Bugetul se oprește cu C3 încă nesatisfăcută."],
+      ["Formula tot este SAT","Ramurile anterioare au arătat soluții SAT."]
+    ],
+    loop:["bugetul de flips se termină", "unsatisfied_count = 1", "return UNKNOWN, nu UNSAT"],
+    concept:["Această ramură nu găsește soluția în buget.", "UNKNOWN este rezultat de local search, nu dovadă logică."]
+  }
+];
+
+let current = 0;
+let auto = null;
+const TOTAL = STEPS.length - 1;
+
+function buildClauses() {
+  const root = document.getElementById("clause-list");
+  root.innerHTML = CLAUSES.map(c => `<div class="clause" id="cl-${c.id}"></div>`).join("");
+}
+
+function currentBranchKey(s, index) {
+  if (s.badBranch) return "fail";
+  if (s.branch) return "alt";
+  return "greedy";
+}
+
+function renderBranchTrace(s, index) {
+  const currentKey = currentBranchKey(s, index);
+  const cards = [
+    {
+      key: "greedy",
+      title: "1. Greedy → SAT",
+      text: "C1 alege a. Formula ajunge rapid la SAT.",
+      done: index > 5
+    },
+    {
+      key: "alt",
+      title: "2. Random b → SAT",
+      text: "Noise alege b. Traseu diferit, dar tot găsește soluție.",
+      done: index > 9
+    },
+    {
+      key: "fail",
+      title: "3. Buget mic → UNKNOWN",
+      text: "O ramură demonstrativă se oprește cu o clauză încă falsă.",
+      done: false,
+      fail: true
+    }
+  ];
+
+  document.getElementById("branch-trace").innerHTML = cards.map(card => {
+    const cls = [
+      "branch-card",
+      card.key === currentKey ? "active" : "",
+      card.done && card.key !== currentKey ? "done" : "",
+      card.fail ? "fail" : ""
+    ].join(" ");
+    return `<div class="${cls}">
+      <div class="branch-title">${card.title}</div>
+      <div class="branch-text">${card.text}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderClauses(s) {
+  CLAUSES.forEach(c => {
+    const info = clauseInfo(c, s.a);
+    const el = document.getElementById("cl-" + c.id);
+    el.className = "clause " + (info.sat ? "true" : "false");
+    if (s.chosen === c.id) el.classList.add("chosen");
+    if (s.flipVar && c.lits.some(l => idToName[Math.abs(l)] === s.flipVar)) el.classList.add("touched");
+    const litHtml = info.values.map(x => `<span class="lit ${x.ok ? "ok" : "bad"}">${litName(x.lit)}</span>`).join(" ∨ ");
+    el.innerHTML = `<strong>${c.id}</strong> (${litHtml}) <span class="clause-status">${info.sat ? "SAT" : "UNSAT"} · lit. adevărați: ${info.trueCount}/${c.lits.length}</span>`;
+  });
+}
+
+function renderVars(s) {
+  const root = document.getElementById("vars");
+  root.innerHTML = VARS.map(v => {
+    const val = s.a[v.name];
+    const isCand = s.candidates.includes(v.name);
+    const isFlip = s.flipVar === v.name;
+    let note = "neafectată în acest pas";
+    if (isCand) note = "candidat din clauza aleasă";
+    if (isFlip) note = "variabila selectată pentru flip";
+    const cls = "var-card" + (isCand ? " candidate" : "") + (isFlip ? " flip" : "");
+    const badge = isFlip ? `<span class="badge flip">flip</span>` : isCand ? `<span class="badge candidate">candidat</span>` : "";
+    return `<div class="${cls}">
+      <div class="var-head"><span>${v.name}</span>${badge}</div>
+      <div class="value ${val ? "one" : "zero"}">${val ? "1 / true" : "0 / false"}</div>
+      <div class="var-note">${note}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderCompact(s) {
+  document.getElementById("assignment-compact").innerHTML =
+    `<div class="box">${VARS.map(v => `${v.name}=${s.a[v.name] ? 1 : 0}`).join(", ")}</div>`;
+}
+
+function renderMetrics(s) {
+  const m = s.m;
+  const items = [
+    ["Try", m.try], ["Flips", m.flips], ["Unsat", m.unsat],
+    ["Best", m.best], ["Noise", m.noise], ["Status", m.status]
+  ];
+  if (s.badBranch) items.push(["Branch", "ALT FAIL"]);
+  else if (s.branch) items.push(["Branch", "ALT"]);
+  document.getElementById("metrics").innerHTML =
+    items.map(([k,v]) => `<div class="metric"><strong>${v}</strong><span>${k}</span></div>`).join("");
+}
+
+function renderChoice(s) {
+  const root = document.getElementById("choice-panel");
+  if (!s.chosen || !s.candidates.length) {
+    root.innerHTML = `<div class="box">Nu există alegere de flip în acest pas.</div>`;
+    return;
+  }
+  const scores = s.candidates.map(v => ({v, ...score(s.a, v)}));
+  const best = Math.min(...scores.map(x => x.afterUnsat));
+  const rows = scores.map(x => {
+    const cls = s.flipVar === x.v ? "chosen" : x.afterUnsat === best ? "best" : "";
+    return `<tr class="${cls}"><td>${x.v}</td><td>${x.make}</td><td>${x.break}</td><td>${x.afterUnsat}</td></tr>`;
+  }).join("");
+  const modeLabel = s.mode === "random" ? "random walk" : s.mode === "greedy" ? "greedy repair" : "preview";
+  const modeClass = s.mode === "random" ? "random" : "greedy";
+  root.innerHTML = `
+    <div class="box" style="margin-bottom:8px">
+      <span class="badge ${modeClass}">mod: ${modeLabel}</span><br>
+      Candidații vin din clauza ${s.chosen}.
+    </div>
+    <table>
+      <thead><tr><th>var</th><th>make</th><th>break</th><th>unsat după</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderSources(s) {
+  document.getElementById("source-list").innerHTML =
+    s.sources.map(([t,d]) => `<div class="box"><strong>${t}</strong><br><span style="color:var(--muted)">${d}</span></div>`).join("");
+}
+
+function renderBottom(s) {
+  document.getElementById("loop").innerHTML = s.loop.map(x => `<div>${x}</div>`).join("");
+  document.getElementById("concept").innerHTML = s.concept.map(x => `<div>${x}</div>`).join("");
+  document.getElementById("concept-card").classList.toggle("sat-highlight", s.m.status === "SAT");
+}
+
+function render(i) {
+  const s = STEPS[i];
+  document.getElementById("step-desc").innerHTML = s.desc;
+  document.getElementById("step-counter").textContent = `Pas ${i} / ${TOTAL}`;
+  renderBranchTrace(s, i);
+  document.getElementById("branch-banner").classList.toggle("visible", !!s.branch && !s.badBranch);
+  document.getElementById("bad-branch-banner").classList.toggle("visible", !!s.badBranch);
+  renderClauses(s);
+  renderVars(s);
+  renderCompact(s);
+  renderMetrics(s);
+  renderChoice(s);
+  renderSources(s);
+  renderBottom(s);
+  document.getElementById("btn-prev").disabled = i === 0;
+  document.getElementById("btn-next").disabled = i === TOTAL;
+}
+
+function stopAuto() {
+  if (auto) clearInterval(auto);
+  auto = null;
+  document.getElementById("btn-auto").textContent = "▶ Auto play";
+}
+
+document.getElementById("btn-next").onclick = () => { if (current < TOTAL) render(++current); };
+document.getElementById("btn-prev").onclick = () => { if (current > 0) render(--current); };
+document.getElementById("btn-reset").onclick = () => { stopAuto(); current = 0; render(current); };
+document.getElementById("btn-auto").onclick = () => {
+  if (auto) { stopAuto(); return; }
+  document.getElementById("btn-auto").textContent = "⏸ Stop auto";
+  auto = setInterval(() => {
+    if (current < TOTAL) render(++current);
+    else stopAuto();
+  }, 2300);
+};
+
+buildClauses();
+render(0);
+</script>
+</body>
+</html>
