@@ -190,6 +190,14 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(result.status, "CANCELLED")
 
+    def test_walksat_cancelled_before_start(self):
+        token = RunToken()
+        token.cancel()
+
+        result = solve_clauses([[1]], "WalkSAT", cancel_token=token)
+
+        self.assertEqual(result.status, "CANCELLED")
+
     def test_solver_timeout_before_start_returns_timeout(self):
         events = []
 

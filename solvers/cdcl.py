@@ -13,6 +13,8 @@ class Clause:
     watch1: int = 0
     watch2: int = 0
     created: int = 0
+    lbd: int | None = None
+    last_used: int = 0
 
 
 def _normalise_formula(clauses):
@@ -66,6 +68,41 @@ def _dedupe_clause(lits):
     return clean
 
 
+def clause_lbd(lits, levels):
+    """Return the number of distinct decision levels touched by clause lits."""
+    return len({levels[abs(lit)] for lit in lits})
+
+
+def learned_clause_delete_key(clause):
+    """
+    Sort key for learned-clause deletion. Larger keys are worse clauses.
+
+    Binary and low-LBD clauses are deliberately protected by lower key values.
+    """
+    lbd = clause.lbd if clause.lbd is not None else len(clause.lits) + 1000
+    binary_penalty = 0 if len(clause.lits) <= 2 else 1
+    return (
+        binary_penalty,
+        lbd,
+        len(clause.lits),
+        -clause.last_used,
+        -clause.created,
+    )
+
+
+def learned_clauses_to_delete(learned, locked, learned_clause_limit):
+    remove_count = len(learned) - learned_clause_limit
+    if remove_count <= 0:
+        return set()
+
+    unlocked = [clause for clause in learned if clause not in locked]
+    if not unlocked:
+        return set()
+
+    removable = sorted(unlocked, key=learned_clause_delete_key, reverse=True)
+    return set(removable[:remove_count])
+
+
 def cdcl(
     clauses,
     max_conflicts=None,
@@ -90,6 +127,8 @@ def cdcl(
         "conflicts": 0,
         "learned_clauses": 0,
         "active_learned_clauses": 0,
+        "deleted_learned_clauses": 0,
+        "avg_lbd": 0.0,
         "restarts": 0,
         "elapsed": 0.0,
     }
@@ -172,7 +211,9 @@ def cdcl(
                 f"conflicts={stats['conflicts']}, "
                 f"propagations={stats['propagations']}, "
                 f"learned={stats['learned_clauses']} "
-                f"active learned={stats['active_learned_clauses']}"
+                f"active learned={stats['active_learned_clauses']} "
+                f"deleted learned={stats['deleted_learned_clauses']} "
+                f"avg_lbd={stats['avg_lbd']:.2f}"
             ),
         )
 
@@ -284,16 +325,11 @@ def cdcl(
         watches[clause.lits[clause.watch1]].append(clause)
         watches[clause.lits[clause.watch2]].append(clause)
 
-    def rebuild_watches():
-        watches.clear()
-        for clause in clauses_db:
-            watch_clause(clause)
-
     def update_active_learned_count():
-        stats["active_learned_clauses"] = sum(
-            1 for clause in clauses_db
-            if clause.learnt
-        )
+        learned = [clause for clause in clauses_db if clause.learnt]
+        stats["active_learned_clauses"] = len(learned)
+        lbd_values = [clause.lbd for clause in learned if clause.lbd is not None]
+        stats["avg_lbd"] = sum(lbd_values) / len(lbd_values) if lbd_values else 0.0
 
     def attach_clause(clause):
         """
@@ -306,11 +342,11 @@ def cdcl(
         clauses_db.append(clause)
         watch_clause(clause)
 
-    def add_clause(lits, learnt=False):
+    def add_clause(lits, learnt=False, lbd=None):
         nonlocal learned_sequence
         if learnt:
             learned_sequence += 1
-        clause = Clause(list(lits), learnt=learnt, created=learned_sequence if learnt else 0)
+        clause = Clause(list(lits), learnt=learnt, created=learned_sequence if learnt else 0, lbd=lbd)
         attach_clause(clause)
         return clause
 
@@ -392,6 +428,7 @@ def cdcl(
 
                 if not enqueue(other_lit, clause):
                     return clause
+                clause.last_used = stats["conflicts"]
 
                 i += 1
 
@@ -520,18 +557,11 @@ def cdcl(
             return
 
         locked = active_reason_clauses()
-        unlocked = [clause for clause in learned if clause not in locked]
-        remove_count = len(learned) - learned_clause_limit
-        if remove_count <= 0 or not unlocked:
+        remove_set = learned_clauses_to_delete(learned, locked, learned_clause_limit)
+        if not remove_set:
             return
 
-        # Prefer removing long, old clauses. Locked reason clauses stay alive.
-        removable = sorted(unlocked, key=lambda clause: (-len(clause.lits), clause.created))
-        remove_set = set(removable[:remove_count])
-        
         clauses_db[:] = [clause for clause in clauses_db if clause not in remove_set]
-
-        # rebuild_watches()
 
         # Important: do not rebuild all watches during an active search.
         # Only remove deleted clauses from existing watch lists.
@@ -544,7 +574,8 @@ def cdcl(
             if not watches[lit]:
                 del watches[lit]
 
-        stats["active_learned_clauses"] = len([clause for clause in clauses_db if clause.learnt])
+        stats["deleted_learned_clauses"] += len(remove_set)
+        update_active_learned_count()
 
     def unresolved_clause_lits():
         for clause in clauses_db:
@@ -663,9 +694,11 @@ def cdcl(
                 return finish(None, "UNSAT")
 
             learnt_lits = _dedupe_clause(learnt_lits)
-            learnt_clause = add_clause(learnt_lits, learnt=True)
+            learnt_lbd = clause_lbd(learnt_lits, levels)
+            learnt_clause = add_clause(learnt_lits, learnt=True, lbd=learnt_lbd)
             stats["learned_clauses"] += 1
             update_active_learned_count()
+            log_debug(f"learned clause LBD {learnt_lbd}")
 
             backtrack(backjump_level)
 

@@ -5,11 +5,33 @@ import time
 from solvers.cdcl import cdcl
 from solvers.dpll import dpll
 from solvers.heuristics import choose_variable_small_clause
+from solvers.walksat import walksat
 from sat_core.models import ProblemInstance, SolveResult
 from sat_core.runtime import EVENT_LOG, RunToken, cancellation_status, emit, stop_requested
 
 
-SOLVERS = ("CDCL", "DPLL")
+SOLVERS = ("CDCL", "DPLL", "WalkSAT")
+
+
+def _canonical_solver_name(solver_name: str) -> str:
+    key = solver_name.strip().upper()
+    if key == "WALKSAT":
+        return "WalkSAT"
+    if key in ("CDCL", "DPLL"):
+        return key
+    return key
+
+
+def _options_for_solver(solver_name: str, options: dict) -> dict:
+    solver_options = dict(options)
+    if solver_name == "CDCL":
+        solver_options["random_seed"] = options.get("cdcl_random_seed", options.get("random_seed"))
+    elif solver_name == "WalkSAT":
+        for key in ("max_tries", "max_flips", "noise", "random_seed"):
+            solver_key = f"walksat_{key}"
+            if solver_key in options:
+                solver_options[key] = options[solver_key]
+    return solver_options
 
 
 def solve_clauses(
@@ -20,8 +42,9 @@ def solve_clauses(
     logging_options: dict | None = None,
     timeout_seconds: float | None = None,
 ) -> SolveResult:
-    solver_name = solver_name.upper()
+    solver_name = _canonical_solver_name(solver_name)
     logging_options = logging_options or {}
+    solver_logging_options = _options_for_solver(solver_name, logging_options)
     if timeout_seconds is not None:
         cancel_token = RunToken(timeout_seconds=timeout_seconds, parent=cancel_token)
     started = time.perf_counter()
@@ -53,7 +76,7 @@ def solve_clauses(
             return_stats=True,
             event_callback=event_callback,
             cancel_token=cancel_token,
-            logging_options=logging_options,
+            logging_options=solver_logging_options,
         )
         elapsed = stats.get("elapsed", time.perf_counter() - started)
         status = stats.get("status", "SAT" if solution is not None else "UNSAT")
@@ -64,14 +87,24 @@ def solve_clauses(
             cancel_token=cancel_token,
             return_stats=True,
             event_callback=event_callback,
-            logging_options=logging_options,
+            logging_options=solver_logging_options,
         )
         elapsed = stats.get("elapsed", time.perf_counter() - started)
         status = stats.get("status", "SAT" if solution is not None else "UNSAT")
+    elif solver_name == "WalkSAT":
+        solution, stats = walksat(
+            clauses,
+            return_stats=True,
+            event_callback=event_callback,
+            cancel_token=cancel_token,
+            logging_options=solver_logging_options,
+        )
+        elapsed = stats.get("elapsed", time.perf_counter() - started)
+        status = stats.get("status", "SAT" if solution is not None else "UNKNOWN")
     else:
         raise ValueError(f"Unknown solver: {solver_name}")
 
-    stats.setdefault("solver_options", _solver_options_summary(solver_name, logging_options))
+    stats.setdefault("solver_options", _solver_options_summary(solver_name, solver_logging_options))
 
     if status == "CANCELLED":
         emit(event_callback, EVENT_LOG, f"{solver_name} cancelled after {elapsed:.4f}s.")
@@ -128,7 +161,12 @@ def _stats_summary(stats: dict) -> str:
         ("conflicts", "conflicts"),
         ("propagations", "propagations"),
         ("learned_clauses", "learned"),
+        ("deleted_learned_clauses", "deleted learned"),
+        ("avg_lbd", "avg LBD"),
         ("restarts", "restarts"),
+        ("tries", "tries"),
+        ("flips", "flips"),
+        ("best_unsatisfied", "best unsatisfied"),
     ]
     parts = [f"{label}={stats[key]}" for key, label in labels if key in stats]
     return ", ".join(parts)
@@ -141,6 +179,13 @@ def _solver_options_summary(solver_name: str, options: dict) -> str:
             f"phase={options.get('initial_phase', 'Positive first')}; "
             f"restart={options.get('restart_interval') or '-'}; "
             f"learned_limit={options.get('learned_clause_limit') or '-'}; "
+            f"seed={options.get('random_seed') or '-'}"
+        )
+    if solver_name == "WalkSAT":
+        return (
+            f"tries={options.get('max_tries', 10)}; "
+            f"flips={options.get('max_flips', 10000)}; "
+            f"noise={options.get('noise', 0.5)}; "
             f"seed={options.get('random_seed') or '-'}"
         )
     return "DPLL small-clause"

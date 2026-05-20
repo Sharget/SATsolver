@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
 
 from solvers.cdcl import cdcl
 from solvers.dpll import dpll
+from solvers.walksat import walksat
 from utils.dimacs import read_dimacs_cnf
 
 
@@ -19,9 +20,15 @@ CASES = [
 
 def time_solver(name, solver, clauses):
     start = time.perf_counter()
-    solution, stats = solver(clauses, return_stats=True) if name == "CDCL" else (solver(clauses), None)
+    if name in ("CDCL", "WalkSAT"):
+        solution, stats = solver(clauses, return_stats=True)
+    else:
+        solution, stats = solver(clauses), None
     elapsed = time.perf_counter() - start
-    status = "SAT" if solution is not None else "UNSAT"
+    if stats is not None:
+        status = stats.get("status", "SAT" if solution is not None else "UNKNOWN")
+    else:
+        status = "SAT" if solution is not None else "UNSAT"
     return status, elapsed, stats
 
 
@@ -31,10 +38,10 @@ def main():
     for path in CASES:
         clauses = read_dimacs_cnf(path)
 
-        for name, solver in [("DPLL", dpll), ("CDCL", cdcl)]:
+        for name, solver in [("DPLL", dpll), ("CDCL", cdcl), ("WalkSAT", walksat)]:
             status, elapsed, stats = time_solver(name, solver, clauses)
-            conflicts = "-" if stats is None else stats["conflicts"]
-            decisions = "-" if stats is None else stats["decisions"]
+            conflicts = "-" if stats is None else stats.get("conflicts", "-")
+            decisions = "-" if stats is None else stats.get("decisions", stats.get("flips", "-"))
             print(f"{path}\t{name}\t{status}\t{elapsed:.6f}s\t{conflicts}\t{decisions}")
 
 

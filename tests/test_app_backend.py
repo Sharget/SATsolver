@@ -19,9 +19,9 @@ from problems.n_queens import n_queens_problem, n_queens_var
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.benchmark import graph_coloring_sweep, result_to_row
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
-from sat_core.models import BenchmarkRow, SolveResult
-from sat_core.runtime import EVENT_LOG, RunEvent
-from sat_core.solver_runner import solve_problem
+from sat_core.models import BenchmarkRow, ProblemInstance, SolveResult
+from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_ROW, RunEvent, RunToken
+from sat_core.solver_runner import SOLVERS, solve_problem
 from utils.general_utils import color_var, sudoku_var
 from utils.colored_graph import decode_coloring, generate_random_graph_exact_edges, graph_edges
 
@@ -123,6 +123,13 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].problem_type, "Graph Coloring")
         self.assertEqual(rows[0].solver, "CDCL")
+
+    def test_walksat_benchmark_sweep_rows(self):
+        rows = graph_coloring_sweep([3], [0.2], [2], ["WalkSAT"], repeats=1, seed=7)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].solver, "WalkSAT")
+        self.assertIn(rows[0].status, ("SAT", "UNKNOWN"))
 
     def test_average_benchmark_groups_finished_repeats_only(self):
         app = SATApp.__new__(SATApp)
@@ -301,6 +308,28 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(options["restart_interval"], 25)
         self.assertEqual(options["learned_clause_limit"], 200)
         self.assertEqual(options["random_seed"], 7)
+        self.assertEqual(options["cdcl_random_seed"], 7)
+        self.assertEqual(options["walksat_max_tries"], 10)
+        self.assertEqual(options["walksat_max_flips"], 10000)
+        self.assertEqual(options["walksat_noise"], 0.5)
+        self.assertIsNone(options["walksat_random_seed"])
+
+    def test_walksat_option_form_builder(self):
+        app = SATApp.__new__(SATApp)
+
+        options = app._logging_options(
+            False,
+            "Periodic progress",
+            walksat_max_tries="3",
+            walksat_max_flips="40",
+            walksat_noise="0.25",
+            walksat_random_seed="9",
+        )
+
+        self.assertEqual(options["walksat_max_tries"], 3)
+        self.assertEqual(options["walksat_max_flips"], 40)
+        self.assertEqual(options["walksat_noise"], 0.25)
+        self.assertEqual(options["walksat_random_seed"], 9)
 
     def test_benchmark_row_records_solver_options(self):
         problem = random_graph_coloring_problem(4, 0.5, 3, seed=3)
@@ -517,6 +546,20 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("Hamiltonian Path", PROBLEM_KINDS)
             self.assertIn("Independent Set", PROBLEM_KINDS)
             self.assertIn("N-Queens", BENCHMARK_PROBLEMS)
+            self.assertIn("WalkSAT", SOLVERS)
+            self.assertIn("WalkSAT", app.solve_solver_guide.guide_text)
+            self.assertIn("UNKNOWN", app.solve_solver_guide.guide_text)
+            self.assertIn("WalkSAT", app.benchmark_solver_guide.guide_text)
+            self.assertFalse(app.bench_walksat.get())
+            self.assertEqual(str(app.solve_cdcl_options_frame.cget("text")), "CDCL Options")
+            self.assertEqual(str(app.benchmark_cdcl_options_frame.cget("text")), "CDCL Options")
+            self.assertEqual(str(app.solve_walksat_options_frame.cget("text")), "WalkSAT Options")
+            self.assertEqual(str(app.benchmark_walksat_options_frame.cget("text")), "WalkSAT Options")
+            self.assertEqual(app.walksat_max_tries.get(), "10")
+            self.assertEqual(app.walksat_max_flips.get(), "10000")
+            self.assertEqual(app.walksat_noise.get(), "0.5")
+            self.assertEqual(str(app.solve_jobs_scrollbar.cget("orient")), "vertical")
+            self.assertEqual(str(app.benchmark_jobs_scrollbar.cget("orient")), "vertical")
 
             self.assertEqual(app.problem_description.get(), "Fill an n x n grid so each row, column, and square box contains every value exactly once.")
             self.assertEqual(str(app.solver_log_box.cget("state")), "disabled")
@@ -538,12 +581,12 @@ class AppBackendTests(unittest.TestCase):
             app._refresh_benchmark_form()
             self.assertEqual(app._selected_sudoku_benchmark_sizes(), [4, 9])
             self.assertEqual(str(app.skip_benchmark_button.cget("state")), "disabled")
-            app.active_process_skip = object()
-            app._set_run_active(True, "Benchmarking")
+            skip_event = object()
+            benchmark_job = app._create_job("benchmark", "Benchmarking", skip_event=skip_event)
+            benchmark_job.status = "Running"
+            app._update_job_row(benchmark_job)
             self.assertEqual(str(app.skip_benchmark_button.cget("state")), "normal")
-            app._set_run_active(False)
-            app.active_process_skip = None
-            app._refresh_skip_button_state()
+            app._finish_job(benchmark_job, "Done")
             self.assertEqual(str(app.skip_benchmark_button.cget("state")), "disabled")
             self.assertFalse(app.bench_sudoku_size_vars[16].get())
             self.assertFalse(app.bench_sudoku_size_vars[25].get())
@@ -584,6 +627,363 @@ class AppBackendTests(unittest.TestCase):
 
             feed = app.feed_text.get("1.0", tk.END)
             self.assertIn("background hello", feed)
+        finally:
+            root.destroy()
+
+    def test_parallel_jobs_can_start_while_another_job_is_running(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            app._create_job("benchmark", "Long benchmark")
+
+            def worker(_token, event_callback):
+                event_callback(RunEvent(EVENT_LOG, "parallel hello"))
+
+            solve_job = app._start_worker("Tiny solve", worker, kind="solve")
+            time.sleep(0.05)
+            app._poll_run_events()
+
+            self.assertEqual(len(app.jobs), 2)
+            self.assertEqual(solve_job.kind, "solve")
+            self.assertIn("parallel hello", app.feed_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_job_tagged_solve_events_update_only_selected_job(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("solve", "Second solve")
+
+            app._handle_run_event(RunEvent(
+                EVENT_CNF,
+                payload={
+                    "_job_id": first.job_id,
+                    "problem": {
+                        "name": "first problem",
+                        "problem_type": "DIMACS",
+                        "clauses": [[1]],
+                        "metadata": {},
+                    },
+                    "dimacs": "p cnf 1 1\n1 0\n",
+                },
+            ))
+
+            self.assertIsNone(app.current_problem)
+            app._select_job(first.job_id)
+            self.assertEqual(app.current_problem.name, "first problem")
+            self.assertEqual(app.selected_job_id, first.job_id)
+            self.assertNotEqual(app.selected_job_id, second.job_id)
+        finally:
+            root.destroy()
+
+    def test_cancel_selected_job_does_not_cancel_other_jobs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("solve", "Second solve")
+            first.token = RunToken()
+            second.token = RunToken()
+
+            app._select_job(first.job_id)
+            app.cancel_active_run()
+
+            self.assertTrue(first.token.is_cancelled())
+            self.assertFalse(second.token.is_cancelled())
+            self.assertEqual(first.status, "Cancelling...")
+        finally:
+            root.destroy()
+
+    def test_job_selection_event_does_not_recurse(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            job = app._create_job("solve", "Selectable solve")
+            app.updating_job_selection = True
+            app._on_solve_job_selected()
+            app.updating_job_selection = False
+
+            self.assertEqual(app.selected_job_id, job.job_id)
+            self.assertEqual(app.solve_jobs_table.selection(), (job.job_id,))
+        finally:
+            root.destroy()
+
+    def test_combobox_mousewheel_scrolls_page_instead_of_value(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            calls = []
+            canvas = app.solve_tab._tab_scroll_canvas
+            original_yview_scroll = canvas.yview_scroll
+
+            def fake_yview_scroll(amount, units):
+                calls.append((amount, units))
+
+            canvas.yview_scroll = fake_yview_scroll
+
+            event = type("Event", (), {})()
+            event.widget = app.solver_log_box
+            event.delta = -120
+            event.state = 0
+
+            self.assertEqual(app._scroll_page_from_combobox(event), "break")
+            self.assertEqual(calls, [(1, "units")])
+            canvas.yview_scroll = original_yview_scroll
+        finally:
+            root.destroy()
+
+    def test_per_tab_job_tables_separate_solve_and_benchmark_jobs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            solve_job = app._create_job("solve", "Solve job")
+            benchmark_job = app._create_job("benchmark", "Benchmark job")
+
+            self.assertTrue(app.solve_jobs_table.exists(solve_job.job_id))
+            self.assertFalse(app.solve_jobs_table.exists(benchmark_job.job_id))
+            self.assertTrue(app.benchmark_jobs_table.exists(benchmark_job.job_id))
+            self.assertFalse(app.benchmark_jobs_table.exists(solve_job.job_id))
+        finally:
+            root.destroy()
+
+    def test_selecting_finished_solve_job_reloads_result_view(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            job = app._create_job("solve", "Finished solve")
+            app._handle_run_event(RunEvent(
+                EVENT_CNF,
+                payload={
+                    "_job_id": job.job_id,
+                    "problem": {
+                        "name": "tiny cnf",
+                        "problem_type": "DIMACS",
+                        "clauses": [[1]],
+                        "metadata": {},
+                    },
+                    "dimacs": "p cnf 1 1\n1 0\n",
+                },
+            ))
+            job.result = SolveResult("CDCL", "SAT", 0.01, {1: True}, clauses=1, variables=1)
+            job.finished = True
+
+            app.cnf_text.delete("1.0", tk.END)
+            app._select_job(job.job_id)
+
+            self.assertEqual(app.current_problem.name, "tiny cnf")
+            self.assertIn("p cnf 1 1", app.cnf_text.get("1.0", tk.END))
+            self.assertIn("Status: SAT", app.result_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_parallel_benchmark_rows_are_appended_and_labeled(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("benchmark", "First benchmark")
+            second = app._create_job("benchmark", "Second benchmark")
+            first_row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            second_row = BenchmarkRow("case two", "N-Queens", "WalkSAT", "UNKNOWN", 0.2, 1, 1, 1)
+
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": first.job_id, "row": first_row}, current=1, total=2))
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": second.job_id, "row": second_row}, current=1, total=2))
+
+            self.assertEqual(len(app.benchmark_rows), 2)
+            self.assertEqual(first_row.run_label, first.label)
+            self.assertEqual(second_row.run_label, second.label)
+            self.assertEqual(app.benchmark_table.set(app.benchmark_table.get_children()[0], "run"), first.label)
+            self.assertEqual(app.benchmark_table.set(app.benchmark_table.get_children()[1], "run"), second.label)
+            self.assertEqual(first_row.as_csv_row()[0], first.label)
+        finally:
+            root.destroy()
+
+    def test_benchmark_run_filter_and_clear_actions(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            app.draw_benchmark_chart = lambda: None
+            first = app._create_job("benchmark", "First benchmark")
+            second = app._create_job("benchmark", "Second benchmark")
+            first_row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            second_row = BenchmarkRow("case two", "N-Queens", "WalkSAT", "UNKNOWN", 0.2, 1, 1, 1)
+
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": first.job_id, "row": first_row}, current=1, total=2))
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": second.job_id, "row": second_row}, current=1, total=2))
+
+            app._select_job(first.job_id)
+            app.show_selected_benchmark_run()
+            self.assertEqual(app.benchmark_filter_run_label, first.label)
+            self.assertEqual(len(app.benchmark_table.get_children()), 1)
+            self.assertEqual(app._visible_benchmark_rows(), [first_row])
+            self.assertIsNotNone(app.pending_benchmark_chart_after_id)
+            app.root.after_cancel(app.pending_benchmark_chart_after_id)
+            app.pending_benchmark_chart_after_id = None
+
+            app.show_all_benchmark_runs()
+            self.assertIsNone(app.benchmark_filter_run_label)
+            self.assertEqual(len(app.benchmark_table.get_children()), 2)
+            self.assertIsNotNone(app.pending_benchmark_chart_after_id)
+            app.root.after_cancel(app.pending_benchmark_chart_after_id)
+            app.pending_benchmark_chart_after_id = None
+
+            app._select_job(first.job_id)
+            app.clear_selected_benchmark_run_results()
+            self.assertEqual(app.benchmark_rows, [second_row])
+            self.assertEqual(first.rows, [])
+            if app.pending_benchmark_chart_after_id is not None:
+                app.root.after_cancel(app.pending_benchmark_chart_after_id)
+                app.pending_benchmark_chart_after_id = None
+
+            app.clear_all_benchmark_results()
+            self.assertEqual(app.benchmark_rows, [])
+            self.assertEqual(len(app.benchmark_table.get_children()), 0)
+        finally:
+            root.destroy()
+
+    def test_clear_benchmark_table_clears_results_but_keeps_jobs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            job = app._create_job("benchmark", "Benchmark job")
+            row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": job.job_id, "row": row}, current=1, total=1))
+            app.benchmark_filter_run_label = job.label
+            app.benchmark_canvas = type("CanvasStub", (), {"get_tk_widget": lambda self: type("WidgetStub", (), {"destroy": lambda self: None})()})()
+            app.benchmark_figure = object()
+
+            app.clear_benchmark_table()
+
+            self.assertEqual(app.benchmark_rows, [])
+            self.assertTrue(app.benchmark_jobs_table.exists(job.job_id))
+            self.assertIsNone(app.benchmark_filter_run_label)
+            self.assertIsNone(app.benchmark_canvas)
+            self.assertIsNone(app.benchmark_figure)
+            self.assertEqual(len(app.benchmark_table.get_children()), 0)
+            self.assertIn("Select a benchmark row", app.benchmark_detail_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_delete_selected_solve_job_removes_only_that_job(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("solve", "Second solve")
+            first.finished = True
+            first.status = "Done"
+            first.problem = ProblemInstance("first", "DIMACS", [[1]], {})
+            first.dimacs = "p cnf 1 1\n1 0\n"
+            second.finished = True
+            second.status = "Done"
+
+            app._select_job(first.job_id)
+            app.delete_selected_solve_job()
+
+            self.assertNotIn(first.job_id, app.jobs)
+            self.assertIn(second.job_id, app.jobs)
+            self.assertFalse(app.solve_jobs_table.exists(first.job_id))
+            self.assertTrue(app.solve_jobs_table.exists(second.job_id))
+            self.assertIsNone(app.selected_solve_job_id)
+            self.assertIsNone(app.current_problem)
+            self.assertIn("Generate or solve", app.result_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_delete_selected_benchmark_job_removes_its_rows_only(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            app.draw_benchmark_chart = lambda: None
+            first = app._create_job("benchmark", "First benchmark")
+            second = app._create_job("benchmark", "Second benchmark")
+            first.finished = True
+            first.status = "Done"
+            second.finished = True
+            second.status = "Done"
+            first_row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            second_row = BenchmarkRow("case two", "N-Queens", "WalkSAT", "UNKNOWN", 0.2, 1, 1, 1)
+
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": first.job_id, "row": first_row}, current=1, total=2))
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": second.job_id, "row": second_row}, current=1, total=2))
+            app._select_job(first.job_id)
+            app.benchmark_filter_run_label = first.label
+
+            app.delete_selected_benchmark_job()
+
+            self.assertNotIn(first.job_id, app.jobs)
+            self.assertIn(second.job_id, app.jobs)
+            self.assertFalse(app.benchmark_jobs_table.exists(first.job_id))
+            self.assertTrue(app.benchmark_jobs_table.exists(second.job_id))
+            self.assertEqual(app.benchmark_rows, [second_row])
+            self.assertIsNone(app.benchmark_filter_run_label)
+            self.assertEqual(len(app.benchmark_table.get_children()), 1)
+            self.assertEqual(app.benchmark_table.set(app.benchmark_table.get_children()[0], "run"), second.label)
+
+            if app.pending_benchmark_chart_after_id is not None:
+                app.root.after_cancel(app.pending_benchmark_chart_after_id)
+                app.pending_benchmark_chart_after_id = None
         finally:
             root.destroy()
 

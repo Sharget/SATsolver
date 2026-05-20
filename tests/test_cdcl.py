@@ -1,6 +1,6 @@
 import unittest
 
-from solvers.cdcl import cdcl
+from solvers.cdcl import Clause, cdcl, clause_lbd, learned_clause_delete_key, learned_clauses_to_delete
 from solvers.dpll import dpll
 from problems.n_queens import n_queens_problem
 from utils.dimacs import read_dimacs_cnf
@@ -30,6 +30,42 @@ def satisfies(clauses, model):
 
 
 class CDCLTests(unittest.TestCase):
+    def test_lbd_counts_distinct_decision_levels(self):
+        levels = [0, 8, 8, 5, 2]
+
+        self.assertEqual(clause_lbd([1, -2, 3, -4], levels), 3)
+
+    def test_lbd_delete_key_prefers_binary_and_low_lbd_clauses(self):
+        binary = Clause([1, -2], learnt=True, created=1, lbd=2, last_used=1)
+        low_lbd = Clause([1, -2, 3], learnt=True, created=2, lbd=2, last_used=1)
+        high_lbd = Clause([1, -2, 3], learnt=True, created=3, lbd=5, last_used=1)
+
+        ordered = sorted([high_lbd, binary, low_lbd], key=learned_clause_delete_key)
+
+        self.assertEqual(ordered, [binary, low_lbd, high_lbd])
+
+    def test_lbd_delete_key_prefers_recent_active_clauses_when_other_scores_match(self):
+        old_clause = Clause([1, -2, 3], learnt=True, created=1, lbd=4, last_used=1)
+        recent_clause = Clause([1, -2, 3], learnt=True, created=2, lbd=4, last_used=8)
+
+        ordered = sorted([old_clause, recent_clause], key=learned_clause_delete_key)
+
+        self.assertEqual(ordered, [recent_clause, old_clause])
+
+    def test_lbd_pruning_keeps_locked_clauses(self):
+        locked_bad_clause = Clause([1, -2, 3, -4, 5], learnt=True, created=1, lbd=5)
+        low_lbd_clause = Clause([1, 2, 3], learnt=True, created=2, lbd=2)
+        high_lbd_clause = Clause([1, -2, 3, -4], learnt=True, created=3, lbd=4)
+
+        removed = learned_clauses_to_delete(
+            [locked_bad_clause, low_lbd_clause, high_lbd_clause],
+            {locked_bad_clause},
+            learned_clause_limit=1,
+        )
+
+        self.assertNotIn(locked_bad_clause, removed)
+        self.assertIn(high_lbd_clause, removed)
+
     def test_unit_sat(self):
         formula = [[1]]
         solution = cdcl(formula)
@@ -133,6 +169,8 @@ class CDCLTests(unittest.TestCase):
         self.assertIsNone(solution)
         self.assertEqual(stats["status"], "UNSAT")
         self.assertIn("restarts", stats)
+        self.assertIn("deleted_learned_clauses", stats)
+        self.assertIn("avg_lbd", stats)
 
     def test_encoder_split_and_sudoku_generation(self):
         self.assertEqual(sudoku_var(1, 2, 3), 10203)

@@ -4,6 +4,7 @@ import queue
 import threading
 import multiprocessing as mp
 import math
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -70,6 +71,33 @@ PROBLEM_DESCRIPTIONS = {
     "Independent Set": "Choose at least k graph nodes so no two chosen nodes are connected by an edge.",
     "DIMACS/CNF": "Paste or load SAT clauses directly in DIMACS CNF format.",
 }
+SOLVER_GUIDE_ROWS = (
+    ("CDCL", "Complete; learns clauses, backjumps, strongest default for hard formulas."),
+    ("DPLL", "Complete; recursive baseline, simpler and useful for comparison."),
+    ("WalkSAT", "Incomplete; random local search, fast on some SAT cases, UNKNOWN if no model is found."),
+)
+
+
+@dataclass
+class RunJob:
+    job_id: str
+    label: str
+    kind: str
+    title: str
+    status: str = "Starting"
+    progress_current: int | None = None
+    progress_total: int | None = None
+    token: RunToken | None = None
+    thread: threading.Thread | None = None
+    process: mp.Process | None = None
+    cancel_event: object | None = None
+    skip_event: object | None = None
+    finished: bool = False
+    problem: ProblemInstance | None = None
+    dimacs: str = ""
+    result: object | None = None
+    rows: list[BenchmarkRow] = field(default_factory=list)
+    pending_chart_refresh: bool = False
 
 
 def parse_int_list(text: str) -> list[int]:
@@ -110,14 +138,14 @@ class SATApp:
         self.solve_detail_canvas = None
         self.selected_benchmark_row: BenchmarkRow | None = None
         self.event_queue: queue.Queue[RunEvent] = queue.Queue()
-        self.active_token: RunToken | None = None
-        self.active_thread: threading.Thread | None = None
-        self.active_process: mp.Process | None = None
-        self.active_process_cancel = None
-        self.active_process_skip = None
-        self.run_active = False
-        self.pending_chart_refresh = False
-        self.controls_to_disable = []
+        self.jobs: dict[str, RunJob] = {}
+        self.next_job_number = 1
+        self.selected_job_id: str | None = None
+        self.selected_solve_job_id: str | None = None
+        self.selected_benchmark_job_id: str | None = None
+        self.benchmark_filter_run_label: str | None = None
+        self.pending_benchmark_chart_after_id = None
+        self.updating_job_selection = False
 
         self._configure_styles()
         self._build_layout()
@@ -179,6 +207,7 @@ class SATApp:
         xscroll.grid(row=1, column=0, sticky="ew")
 
         content = ttk.Frame(canvas, padding=10)
+        content._tab_scroll_canvas = canvas
         content_window = canvas.create_window(0, 0, window=content, anchor="nw")
 
         def update_scroll_region(_event=None) -> None:
@@ -189,7 +218,31 @@ class SATApp:
             canvas.itemconfigure(content_window, width=max(event.width, requested_width))
             update_scroll_region()
 
-        def scroll_page(event) -> str:
+        def widget_is_inside_scroll_area(widget) -> bool:
+            while widget is not None:
+                if widget is content or widget is canvas:
+                    return True
+                widget = getattr(widget, "master", None)
+            return False
+
+        def widget_allows_own_scroll(widget) -> bool:
+            while widget is not None:
+                try:
+                    widget_class = widget.winfo_class()
+                except tk.TclError:
+                    return False
+                if widget_class in {"Text", "Treeview", "Entry", "TEntry", "Spinbox", "TSpinbox"}:
+                    return True
+                if widget is content or widget is canvas:
+                    return False
+                widget = getattr(widget, "master", None)
+            return False
+
+        def scroll_page(event) -> str | None:
+            if not widget_is_inside_scroll_area(event.widget):
+                return None
+            if widget_allows_own_scroll(event.widget):
+                return None
             if event.state & 0x0001:
                 canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
             else:
@@ -198,38 +251,38 @@ class SATApp:
 
         content.bind("<Configure>", update_scroll_region)
         canvas.bind("<Configure>", resize_content)
-        canvas.bind("<MouseWheel>", scroll_page)
-        content.bind("<MouseWheel>", scroll_page)
+        canvas.bind_all("<MouseWheel>", scroll_page, add="+")
+        self.root.bind_class("TCombobox", "<MouseWheel>", self._scroll_page_from_combobox)
 
         self.notebook.add(tab, text=title)
         return content
 
+    def _scroll_page_from_combobox(self, event) -> str:
+        widget = event.widget
+        while widget is not None:
+            canvas = getattr(widget, "_tab_scroll_canvas", None)
+            if canvas is not None:
+                if event.state & 0x0001:
+                    canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+                else:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            widget = getattr(widget, "master", None)
+        return "break"
+
     def _build_runtime_panel(self) -> None:
         panel = ttk.LabelFrame(self.root, text="Run Feed", padding=8)
         panel.pack(fill=tk.X, padx=10, pady=(0, 10))
-        panel.columnconfigure(1, weight=1)
+        panel.columnconfigure(0, weight=1)
 
         self.run_status = tk.StringVar(value="Ready")
         self.progress_value = tk.DoubleVar(value=0)
-
-        ttk.Label(panel, textvariable=self.run_status, width=30).grid(row=0, column=0, sticky="w")
-        self.progress_bar = ttk.Progressbar(panel, variable=self.progress_value, maximum=100)
-        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(8, 8))
-
-        self.cancel_button = ttk.Button(
-            panel,
-            text="Cancel",
-            command=self.cancel_active_run,
-            state=tk.DISABLED,
-            style="Danger.TButton",
-        )
-        self.cancel_button.grid(row=0, column=2, padx=(0, 6))
-        ttk.Button(panel, text="Clear Feed", command=self.clear_feed).grid(row=0, column=3)
+        ttk.Button(panel, text="Clear Feed", command=self.clear_feed).grid(row=0, column=0, sticky="e")
 
         self.feed_text = tk.Text(panel, height=7, wrap="word", state=tk.DISABLED)
-        self.feed_text.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.feed_text.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         feed_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.feed_text.yview)
-        feed_scroll.grid(row=1, column=4, sticky="ns", pady=(8, 0))
+        feed_scroll.grid(row=1, column=1, sticky="ns", pady=(8, 0))
         self.feed_text.configure(yscrollcommand=feed_scroll.set)
 
     def clear_feed(self) -> None:
@@ -244,55 +297,219 @@ class SATApp:
         self.feed_text.see(tk.END)
         self.feed_text.configure(state=tk.DISABLED)
 
-    def _set_run_active(self, active: bool, status: str = "Ready") -> None:
-        self.run_active = active
-        self.run_status.set(status)
-        self.cancel_button.configure(state=tk.NORMAL if active else tk.DISABLED)
+    def _selected_job(self) -> RunJob | None:
+        return self.jobs.get(self.selected_job_id) if self.selected_job_id else None
 
-        for control in self.controls_to_disable:
+    def _selected_solve_job(self) -> RunJob | None:
+        return self.jobs.get(self.selected_solve_job_id) if self.selected_solve_job_id else None
+
+    def _selected_benchmark_job(self) -> RunJob | None:
+        return self.jobs.get(self.selected_benchmark_job_id) if self.selected_benchmark_job_id else None
+
+    def _job_kind_group(self, job: RunJob) -> str:
+        return "benchmark" if job.kind == "benchmark" else "solve"
+
+    def _job_table_for_group(self, group: str):
+        if group == "benchmark":
+            return getattr(self, "benchmark_jobs_table", None)
+        return getattr(self, "solve_jobs_table", None)
+
+    def _create_job(self, kind: str, title: str, *, skip_event=None) -> RunJob:
+        number = self.next_job_number
+        self.next_job_number += 1
+        job = RunJob(
+            job_id=f"job-{number}",
+            label=f"J{number}",
+            kind=kind,
+            title=title,
+            skip_event=skip_event,
+        )
+        self.jobs[job.job_id] = job
+        self._insert_job_row(job)
+        self._select_job(job.job_id)
+        self._refresh_job_buttons()
+        return job
+
+    def _job_display_title(self, job: RunJob) -> str:
+        return f"{job.label}: {job.title}"
+
+    def _job_progress_text(self, job: RunJob) -> str:
+        if job.progress_total:
+            return f"{job.progress_current or 0}/{job.progress_total}"
+        return "-"
+
+    def _insert_job_row(self, job: RunJob) -> None:
+        table = self._job_table_for_group(self._job_kind_group(job))
+        if table is None:
+            return
+        table.insert(
+            "",
+            tk.END,
+            iid=job.job_id,
+            values=(
+                self._job_display_title(job),
+                job.status,
+                self._job_progress_text(job),
+            ),
+        )
+
+    def _update_job_row(self, job: RunJob) -> None:
+        table = self._job_table_for_group(self._job_kind_group(job))
+        if table is None or not table.exists(job.job_id):
+            return
+        table.item(
+            job.job_id,
+            values=(
+                self._job_display_title(job),
+                job.status,
+                self._job_progress_text(job),
+            ),
+        )
+        self._refresh_job_buttons()
+
+    def _select_job(self, job_id: str) -> None:
+        if job_id not in self.jobs:
+            return
+        self.selected_job_id = job_id
+        job = self.jobs[job_id]
+        group = self._job_kind_group(job)
+        if group == "benchmark":
+            self.selected_benchmark_job_id = job_id
+        else:
+            self.selected_solve_job_id = job_id
+        table = self._job_table_for_group(group)
+        if table is not None and table.exists(job_id):
+            self.updating_job_selection = True
             try:
-                control.configure(state=tk.DISABLED if active else tk.NORMAL)
-            except tk.TclError:
-                pass
+                table.selection_set(job_id)
+                table.focus(job_id)
+                table.see(job_id)
+            finally:
+                self.updating_job_selection = False
+        if job.kind in {"solve", "generate"} and job.problem is not None:
+            self._display_solve_job(job)
+        self._refresh_job_buttons()
 
-        if active:
-            self.progress_value.set(0)
-
-        self._refresh_skip_button_state()
-
-    def _refresh_skip_button_state(self) -> None:
-        if not hasattr(self, "skip_benchmark_button"):
+    def _on_solve_job_selected(self, _event=None) -> None:
+        if self.updating_job_selection:
             return
 
-        state = tk.NORMAL if self.run_active and self.active_process_skip is not None else tk.DISABLED
-        self.skip_benchmark_button.configure(state=state)
+        selected = self.solve_jobs_table.selection()
+        if not selected:
+            self.selected_solve_job_id = None
+            self._refresh_job_buttons()
+            return
+        job_id = selected[0]
+        self.selected_solve_job_id = job_id
+        self.selected_job_id = job_id
+        job = self.jobs.get(job_id)
+        if job is not None and job.kind in {"solve", "generate"} and job.problem is not None:
+            self._display_solve_job(job)
+        self._refresh_job_buttons()
+
+    def _on_benchmark_job_selected(self, _event=None) -> None:
+        if self.updating_job_selection:
+            return
+
+        selected = self.benchmark_jobs_table.selection()
+        if not selected:
+            self.selected_benchmark_job_id = None
+            self._refresh_job_buttons()
+            return
+        job_id = selected[0]
+        self.selected_benchmark_job_id = job_id
+        self.selected_job_id = job_id
+        self._refresh_job_buttons()
+
+    def _refresh_job_buttons(self) -> None:
+        solve_job = self._selected_solve_job()
+        benchmark_job = self._selected_benchmark_job()
+        selected_job = self.jobs.get(self.selected_job_id) if self.selected_job_id else None
+
+        solve_running = solve_job is not None and not solve_job.finished
+        benchmark_running = benchmark_job is not None and not benchmark_job.finished
+        can_skip = benchmark_running and benchmark_job.skip_event is not None
+        has_finished_solve = any(self._job_kind_group(job) == "solve" and job.finished for job in self.jobs.values())
+        has_finished_benchmark = any(job.kind == "benchmark" and job.finished for job in self.jobs.values())
+        has_benchmark_rows = bool(self.benchmark_rows)
+        selected_run_has_rows = benchmark_job is not None and any(row.run_label == benchmark_job.label for row in self.benchmark_rows)
+        can_delete_solve = solve_job is not None and solve_job.finished
+        can_delete_benchmark = benchmark_job is not None and benchmark_job.finished
+
+        if hasattr(self, "solve_cancel_button"):
+            self.solve_cancel_button.configure(state=tk.NORMAL if solve_running else tk.DISABLED)
+        if hasattr(self, "solve_load_button"):
+            can_load = solve_job is not None and solve_job.problem is not None
+            self.solve_load_button.configure(state=tk.NORMAL if can_load else tk.DISABLED)
+        if hasattr(self, "solve_clear_finished_button"):
+            self.solve_clear_finished_button.configure(state=tk.NORMAL if has_finished_solve else tk.DISABLED)
+        if hasattr(self, "solve_delete_button"):
+            self.solve_delete_button.configure(state=tk.NORMAL if can_delete_solve else tk.DISABLED)
+
+        if hasattr(self, "benchmark_cancel_button"):
+            self.benchmark_cancel_button.configure(state=tk.NORMAL if benchmark_running else tk.DISABLED)
+        if hasattr(self, "benchmark_skip_job_button"):
+            self.benchmark_skip_job_button.configure(state=tk.NORMAL if can_skip else tk.DISABLED)
+        if hasattr(self, "skip_benchmark_button"):
+            self.skip_benchmark_button.configure(state=tk.NORMAL if can_skip else tk.DISABLED)
+        if hasattr(self, "benchmark_show_selected_button"):
+            self.benchmark_show_selected_button.configure(state=tk.NORMAL if selected_run_has_rows else tk.DISABLED)
+        if hasattr(self, "benchmark_show_all_button"):
+            self.benchmark_show_all_button.configure(state=tk.NORMAL if self.benchmark_filter_run_label is not None else tk.DISABLED)
+        if hasattr(self, "benchmark_clear_finished_jobs_button"):
+            self.benchmark_clear_finished_jobs_button.configure(state=tk.NORMAL if has_finished_benchmark else tk.DISABLED)
+        if hasattr(self, "benchmark_clear_selected_results_button"):
+            self.benchmark_clear_selected_results_button.configure(state=tk.NORMAL if selected_run_has_rows else tk.DISABLED)
+        if hasattr(self, "benchmark_clear_all_results_button"):
+            self.benchmark_clear_all_results_button.configure(state=tk.NORMAL if has_benchmark_rows else tk.DISABLED)
+        if hasattr(self, "clear_benchmark_table_button"):
+            self.clear_benchmark_table_button.configure(state=tk.NORMAL if has_benchmark_rows else tk.DISABLED)
+        if hasattr(self, "benchmark_delete_job_button"):
+            self.benchmark_delete_job_button.configure(state=tk.NORMAL if can_delete_benchmark else tk.DISABLED)
+
+        if selected_job is None:
+            self.run_status.set("Ready")
+            self.progress_value.set(0)
+            return
+
+        self.run_status.set(selected_job.status)
+        if selected_job.progress_total:
+            self.progress_value.set((selected_job.progress_current or 0) * 100 / selected_job.progress_total)
+        elif selected_job.finished:
+            self.progress_value.set(100)
+        else:
+            self.progress_value.set(0)
 
     def _queue_event(self, event: RunEvent) -> None:
         self.event_queue.put(event)
 
-    def _start_worker(self, name: str, target) -> None:
-        if self.run_active:
-            messagebox.showinfo("Run already active", "Cancel or wait for the current run to finish.")
-            return
+    def _queue_job_event(self, job_id: str, event: RunEvent) -> None:
+        event.payload = dict(event.payload)
+        event.payload["_job_id"] = job_id
+        self._queue_event(event)
 
+    def _start_worker(self, name: str, target, *, kind: str = "worker") -> RunJob:
+        job = self._create_job(kind, name)
         token = RunToken()
-        self.active_token = token
-        self._set_run_active(True, name)
-        self.append_feed(name)
+        job.token = token
+        job.status = "Running"
+        self._update_job_row(job)
+        self.append_feed(self._job_display_title(job))
 
         def wrapped() -> None:
             try:
-                target(token, self._queue_event)
+                target(token, lambda event: self._queue_job_event(job.job_id, event))
             except Exception as exc:
-                self._queue_event(RunEvent(EVENT_ERROR, str(exc)))
+                self._queue_job_event(job.job_id, RunEvent(EVENT_ERROR, str(exc)))
             finally:
                 if token.is_cancelled():
-                    self._queue_event(RunEvent(EVENT_CANCELLED, "Run cancelled."))
+                    self._queue_job_event(job.job_id, RunEvent(EVENT_CANCELLED, "Run cancelled."))
                 else:
-                    self._queue_event(RunEvent(EVENT_DONE, "Run finished."))
+                    self._queue_job_event(job.job_id, RunEvent(EVENT_DONE, "Run finished."))
 
-        self.active_thread = threading.Thread(target=wrapped, daemon=True)
-        self.active_thread.start()
+        job.thread = threading.Thread(target=wrapped, daemon=True)
+        job.thread.start()
+        return job
 
     def _start_process_worker(
         self,
@@ -301,70 +518,174 @@ class SATApp:
         *args,
         extra_events=(),
         benchmark_skip_event=None,
-    ) -> None:
-        if self.run_active:
-            messagebox.showinfo("Run already active", "Cancel or wait for the current run to finish.")
-            return
-
+        kind: str = "run",
+    ) -> RunJob:
+        job = self._create_job(kind, name, skip_event=benchmark_skip_event)
         process_queue = mp.Queue()
         cancel_event = mp.Event()
         process = mp.Process(target=process_target, args=(*args, *extra_events, process_queue, cancel_event), daemon=True)
 
-        self.active_process = process
-        self.active_process_cancel = cancel_event
-        self.active_process_skip = benchmark_skip_event
-        self._set_run_active(True, name)
-        self.append_feed(name)
+        job.process = process
+        job.cancel_event = cancel_event
+        job.status = "Running"
+        self._update_job_row(job)
+        self.append_feed(self._job_display_title(job))
 
         def supervise() -> None:
-            process.start()
+            try:
+                process.start()
 
-            while process.is_alive() or not process_queue.empty():
-                try:
-                    event = process_queue.get(timeout=0.05)
-                    self._queue_event(event)
-                except queue.Empty:
-                    pass
+                while process.is_alive() or not process_queue.empty():
+                    try:
+                        event = process_queue.get(timeout=0.05)
+                        self._queue_job_event(job.job_id, event)
+                    except queue.Empty:
+                        pass
 
-            process.join(timeout=0.2)
+                process.join(timeout=0.2)
 
-            if cancel_event.is_set():
-                self._queue_event(RunEvent(EVENT_CANCELLED, "Run cancelled."))
-            elif process.exitcode not in (0, None):
-                self._queue_event(RunEvent(EVENT_ERROR, f"Worker process exited with code {process.exitcode}"))
-            else:
-                self._queue_event(RunEvent(EVENT_DONE, "Run finished."))
+                if cancel_event.is_set():
+                    self._queue_job_event(job.job_id, RunEvent(EVENT_CANCELLED, "Run cancelled."))
+                elif process.exitcode not in (0, None):
+                    self._queue_job_event(job.job_id, RunEvent(EVENT_ERROR, f"Worker process exited with code {process.exitcode}"))
+                else:
+                    self._queue_job_event(job.job_id, RunEvent(EVENT_DONE, "Run finished."))
+            except Exception as exc:
+                self._queue_job_event(job.job_id, RunEvent(EVENT_ERROR, f"Could not start worker process: {exc}"))
 
-        self.active_thread = threading.Thread(target=supervise, daemon=True)
-        self.active_thread.start()
+        job.thread = threading.Thread(target=supervise, daemon=True)
+        job.thread.start()
+        return job
 
     def cancel_active_run(self) -> None:
-        if self.active_token is None or not self.run_active:
-            if self.active_process_cancel is None or not self.run_active:
-                return
+        job = self._selected_job()
+        self._cancel_job(job)
 
-        if self.active_token is not None:
-            self.active_token.cancel()
-        if self.active_process_cancel is not None:
-            self.active_process_cancel.set()
+    def cancel_selected_solve_job(self) -> None:
+        self._cancel_job(self._selected_solve_job())
 
-        self.run_status.set("Cancelling...")
-        self.append_feed("Cancel requested; stopping after current solver checkpoint.")
-        self.root.after(1500, self._terminate_process_if_needed)
+    def cancel_selected_benchmark_job(self) -> None:
+        self._cancel_job(self._selected_benchmark_job())
 
-    def skip_current_benchmark_case(self) -> None:
-        if not self.run_active or self.active_process_skip is None:
+    def _cancel_job(self, job: RunJob | None) -> None:
+        if job is None or job.finished:
             return
 
-        self.active_process_skip.set()
-        self.run_status.set("Skipping current benchmark case...")
-        self.append_feed("Skip requested; current benchmark case will be marked SKIPPED at the next solver checkpoint.")
+        if job.token is not None:
+            job.token.cancel()
+        if job.cancel_event is not None:
+            job.cancel_event.set()
 
-    def _terminate_process_if_needed(self) -> None:
-        process = self.active_process
+        job.status = "Cancelling..."
+        self._update_job_row(job)
+        self.append_feed(f"{job.label}: Cancel requested; stopping after current solver checkpoint.")
+        self.root.after(1500, lambda job_id=job.job_id: self._terminate_process_if_needed(job_id))
+
+    def skip_current_benchmark_case(self) -> None:
+        job = self._selected_benchmark_job()
+        if job is None or job.finished or job.kind != "benchmark" or job.skip_event is None:
+            return
+
+        job.skip_event.set()
+        job.status = "Skipping current benchmark case..."
+        self._update_job_row(job)
+        self.append_feed(f"{job.label}: Skip requested; current benchmark case will be marked SKIPPED at the next solver checkpoint.")
+
+    def _terminate_process_if_needed(self, job_id: str) -> None:
+        job = self.jobs.get(job_id)
+        process = job.process if job is not None else None
         if process is not None and process.is_alive():
-            self.append_feed("Worker still running; terminating process.")
+            self.append_feed(f"{job.label}: Worker still running; terminating process.")
             process.terminate()
+
+    def clear_finished_jobs(self) -> None:
+        self.clear_finished_solve_jobs()
+        self.clear_finished_benchmark_jobs()
+
+    def clear_finished_solve_jobs(self) -> None:
+        self._clear_finished_jobs_for_group("solve")
+
+    def clear_finished_benchmark_jobs(self) -> None:
+        self._clear_finished_jobs_for_group("benchmark")
+
+    def delete_selected_solve_job(self) -> None:
+        job = self._selected_solve_job()
+        if job is None or not job.finished:
+            return
+        self._delete_finished_job(job, remove_benchmark_rows=False)
+
+    def delete_selected_benchmark_job(self) -> None:
+        job = self._selected_benchmark_job()
+        if job is None or not job.finished:
+            return
+        self._delete_finished_job(job, remove_benchmark_rows=True)
+
+    def _delete_finished_job(self, job: RunJob, *, remove_benchmark_rows: bool) -> None:
+        if not job.finished:
+            return
+
+        group = self._job_kind_group(job)
+        if remove_benchmark_rows and job.kind == "benchmark":
+            run_label = job.label
+            self.benchmark_rows = [
+                row
+                for row in self.benchmark_rows
+                if row.run_label != run_label
+            ]
+            if self.benchmark_filter_run_label == run_label:
+                self.benchmark_filter_run_label = None
+
+        table = self._job_table_for_group(group)
+        if table is not None and table.exists(job.job_id):
+            table.delete(job.job_id)
+
+        if job.job_id == self.selected_job_id:
+            self.selected_job_id = None
+        if group == "solve" and job.job_id == self.selected_solve_job_id:
+            self.selected_solve_job_id = None
+            self._clear_solve_view()
+        if group == "benchmark" and job.job_id == self.selected_benchmark_job_id:
+            self.selected_benchmark_job_id = None
+            self._set_benchmark_status(f"Deleted {job.label}.")
+
+        del self.jobs[job.job_id]
+
+        if remove_benchmark_rows:
+            self._fill_benchmark_table()
+            self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
+
+    def _clear_finished_jobs_for_group(self, group: str) -> None:
+        removed_selected = False
+        for job_id, job in list(self.jobs.items()):
+            if not job.finished or self._job_kind_group(job) != group:
+                continue
+            removed_selected = removed_selected or job_id == self.selected_job_id
+            if group == "solve" and job_id == self.selected_solve_job_id:
+                self.selected_solve_job_id = None
+            if group == "benchmark" and job_id == self.selected_benchmark_job_id:
+                self.selected_benchmark_job_id = None
+            table = self._job_table_for_group(group)
+            if table is not None and table.exists(job_id):
+                table.delete(job_id)
+            del self.jobs[job_id]
+
+        if removed_selected:
+            self.selected_job_id = None
+        self._refresh_job_buttons()
+
+    def load_selected_solve_job(self) -> None:
+        job = self._selected_solve_job()
+        if job is not None and job.problem is not None:
+            self._display_solve_job(job)
+            self._select_job(job.job_id)
+
+    def _clear_solve_view(self) -> None:
+        self.current_problem = None
+        self.latest_solve_result = None
+        self.cnf_text.delete("1.0", tk.END)
+        self._write_result("Generate or solve a problem to see results.")
+        self._refresh_solve_detail_panel()
 
     def _poll_run_events(self) -> None:
         processed = 0
@@ -381,87 +702,145 @@ class SATApp:
         self.root.after(30, self._poll_run_events)
 
     def _handle_run_event(self, event: RunEvent) -> None:
+        job_id = event.payload.get("_job_id")
+        job = self.jobs.get(job_id) if job_id else None
+        prefix = f"{job.label}: " if job is not None else ""
+
         if event.type == EVENT_LOG:
-            self.append_feed(event.message)
+            self.append_feed(f"{prefix}{event.message}")
             return
 
         if event.type == EVENT_PROGRESS:
-            self._apply_progress(event)
+            self._apply_progress(event, job)
             return
 
         if event.type == EVENT_ROW:
             row = event.payload.get("row")
             if row is not None:
+                if job is not None:
+                    row.run_label = job.label
+                    job.rows.append(row)
                 self.benchmark_rows.append(row)
-                self._insert_benchmark_row(row)
-            self._apply_progress(event)
+                if self.benchmark_filter_run_label is None or row.run_label == self.benchmark_filter_run_label:
+                    self._insert_benchmark_row(row)
+                self._refresh_job_buttons()
+            self._apply_progress(event, job)
             return
 
         if event.type == EVENT_CNF:
-            self._apply_cnf_event(event)
+            self._apply_cnf_event(event, job)
             return
 
         if event.type == EVENT_RESULT:
             result = event.payload.get("result")
             if result is not None:
-                self.latest_solve_result = result
-                self._write_result(self._format_solve_result(result))
-                self._refresh_solve_detail_panel()
-                self.progress_value.set(100)
+                if job is not None:
+                    job.result = result
+                    job.status = result.status
+                    job.progress_current = 1
+                    job.progress_total = 1
+                    self._update_job_row(job)
+                    if self.selected_job_id == job.job_id:
+                        self._display_solve_job(job)
+                else:
+                    self.latest_solve_result = result
+                    self._write_result(self._format_solve_result(result))
+                    self._refresh_solve_detail_panel()
+                    self.progress_value.set(100)
             return
 
         if event.type == EVENT_ERROR:
-            self.append_feed(f"ERROR: {event.message}")
+            if job is not None and job.finished:
+                return
+            self.append_feed(f"{prefix}ERROR: {event.message}")
+            if job is not None:
+                self._finish_job(job, "Failed")
             messagebox.showerror("Run failed", event.message)
             return
 
         if event.type == EVENT_CANCELLED:
-            self.append_feed(event.message or "Run cancelled.")
-            self._finish_run("Cancelled")
+            if job is not None and job.finished:
+                return
+            self.append_feed(f"{prefix}{event.message or 'Run cancelled.'}")
+            if job is not None:
+                self._finish_job(job, "Cancelled")
             return
 
         if event.type == EVENT_DONE:
-            self.append_feed(event.message or "Run finished.")
-            self._finish_run("Ready")
+            if job is not None and job.finished:
+                return
+            self.append_feed(f"{prefix}{event.message or 'Run finished.'}")
+            if job is not None:
+                self._finish_job(job, "Done")
 
-    def _apply_progress(self, event: RunEvent) -> None:
+    def _apply_progress(self, event: RunEvent, job: RunJob | None = None) -> None:
+        if job is not None:
+            job.progress_current = event.current
+            job.progress_total = event.total
+            if event.message:
+                job.status = event.message
+            self._update_job_row(job)
+            return
+
         if event.total:
             self.progress_value.set((event.current or 0) * 100 / event.total)
         if event.message:
             self.run_status.set(event.message)
 
-    def _finish_run(self, status: str) -> None:
-        if not self.run_active:
+    def _finish_job(self, job: RunJob, status: str) -> None:
+        if job.finished:
             return
 
-        self._set_run_active(False, status)
-        self.active_token = None
-        self.active_thread = None
-        self.active_process = None
-        self.active_process_cancel = None
-        self.active_process_skip = None
-        self._refresh_skip_button_state()
+        job.finished = True
+        job.status = status
+        if job.progress_total and job.progress_current is None:
+            job.progress_current = job.progress_total
+        self._update_job_row(job)
 
-        if self.pending_chart_refresh:
-            self.pending_chart_refresh = False
+        if job.pending_chart_refresh:
+            job.pending_chart_refresh = False
             if len(self.benchmark_rows) <= 120:
-                self.draw_benchmark_chart()
+                self._schedule_benchmark_chart_refresh()
             else:
-                self.append_feed("Chart auto-refresh skipped for a large benchmark; use Refresh Chart when you are ready.")
+                self.append_feed(f"{job.label}: Chart auto-refresh skipped for a large benchmark; use Refresh Chart when you are ready.")
 
-    def _apply_cnf_event(self, event: RunEvent) -> None:
+    def _apply_cnf_event(self, event: RunEvent, job: RunJob | None = None) -> None:
         payload = event.payload
         problem_data = payload["problem"]
-        self.current_problem = ProblemInstance(
+        problem = ProblemInstance(
             name=problem_data["name"],
             problem_type=problem_data["problem_type"],
             clauses=problem_data["clauses"],
             metadata=problem_data.get("metadata", {}),
         )
+        if job is not None:
+            job.problem = problem
+            job.dimacs = payload["dimacs"]
+            job.result = None
+            if self.selected_job_id == job.job_id:
+                self._display_solve_job(job)
+            return
+
+        self.current_problem = problem
         self.latest_solve_result = None
         self.cnf_text.delete("1.0", tk.END)
         self.cnf_text.insert("1.0", payload["dimacs"])
         self._write_result(f"Generated {self.current_problem.clause_count} clauses for {self.current_problem.name}.")
+        self._refresh_solve_detail_panel()
+
+    def _display_solve_job(self, job: RunJob) -> None:
+        self.current_problem = job.problem
+        self.latest_solve_result = job.result
+        self.cnf_text.delete("1.0", tk.END)
+        self.cnf_text.insert("1.0", job.dimacs)
+
+        if job.result is not None:
+            self._write_result(self._format_solve_result(job.result))
+        elif job.problem is not None:
+            self._write_result(f"Generated {job.problem.clause_count} clauses for {job.problem.name}.")
+        else:
+            self._write_result("Waiting for CNF generation...")
+
         self._refresh_solve_detail_panel()
 
     def _build_solve_tab(self) -> None:
@@ -509,14 +888,18 @@ class SATApp:
             state="readonly",
             width=24,
         ).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.solve_solver_guide = self._build_solver_guide(controls, row=3, wraplength=230)
 
         self.solve_timeout_seconds = tk.StringVar(value="30")
-        ttk.Label(controls, text="Timeout (s)").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(controls, text="Timeout (s)").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(
             controls,
             textvariable=self.solve_timeout_seconds,
             width=24,
-        ).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        self._build_solve_action_buttons(controls, row=5)
+        self._build_solve_jobs_panel(controls, row=6)
 
         self.advanced_solver_logs = tk.BooleanVar(value=False)
         self.solver_log_level = tk.StringVar(value="Periodic progress")
@@ -526,14 +909,18 @@ class SATApp:
         self.cdcl_restart_interval = tk.StringVar(value="100")
         self.cdcl_learned_clause_limit = tk.StringVar(value="")
         self.cdcl_random_seed = tk.StringVar(value="")
+        self.walksat_max_tries = tk.StringVar(value="10")
+        self.walksat_max_flips = tk.StringVar(value="10000")
+        self.walksat_noise = tk.StringVar(value="0.5")
+        self.walksat_random_seed = tk.StringVar(value="")
         ttk.Checkbutton(
             controls,
             text="Advanced solver logs",
             variable=self.advanced_solver_logs,
             command=self._refresh_solver_log_controls,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.solver_log_label = ttk.Label(controls, text="Log detail")
-        self.solver_log_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.solver_log_label.grid(row=8, column=0, sticky="w", pady=(8, 0))
         self.solver_log_box = ttk.Combobox(
             controls,
             textvariable=self.solver_log_level,
@@ -541,10 +928,10 @@ class SATApp:
             state=tk.DISABLED,
             width=24,
         )
-        self.solver_log_box.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        self._build_cdcl_option_controls(
+        self.solver_log_box.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.solve_cdcl_options_frame = self._build_cdcl_option_group(
             controls,
-            6,
+            9,
             self.cdcl_branching,
             self.cdcl_initial_phase,
             self.cdcl_restarts,
@@ -553,45 +940,18 @@ class SATApp:
             self.cdcl_random_seed,
             width=24,
         )
+        self.solve_walksat_options_frame = self._build_walksat_option_group(
+            controls,
+            10,
+            self.walksat_max_tries,
+            self.walksat_max_flips,
+            self.walksat_noise,
+            self.walksat_random_seed,
+            width=24,
+        )
 
         self.problem_form = ttk.LabelFrame(left, text="Input", padding=8)
         self.problem_form.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-
-        buttons = ttk.Frame(left)
-        buttons.pack(fill=tk.X, pady=(10, 0))
-        self.generate_button = ttk.Button(
-            buttons,
-            text="Generate CNF",
-            command=self.generate_cnf,
-            style="Generate.TButton",
-        )
-        self.solve_button = ttk.Button(
-            buttons,
-            text="Solve",
-            command=self.solve_current,
-            style="Primary.TButton",
-        )
-        self.save_cnf_button = ttk.Button(
-            buttons,
-            text="Save CNF",
-            command=self.save_cnf_dialog,
-            style="Export.TButton",
-        )
-        self.load_dimacs_button = ttk.Button(
-            buttons,
-            text="Load DIMACS",
-            command=self.load_dimacs_dialog,
-            style="Export.TButton",
-        )
-
-        for button, padding in [
-            (self.generate_button, 0),
-            (self.solve_button, 6),
-            (self.save_cnf_button, 6),
-            (self.load_dimacs_button, 6),
-        ]:
-            button.pack(fill=tk.X, pady=(padding, 0))
-            self.controls_to_disable.append(button)
 
         ttk.Label(right, text="CNF Preview").grid(row=0, column=0, sticky="w")
         self.cnf_text = tk.Text(right, height=22, wrap="none")
@@ -611,6 +971,104 @@ class SATApp:
 
         self._refresh_problem_form()
         self._refresh_solver_log_controls()
+
+    def _build_solve_action_buttons(self, parent, row: int) -> None:
+        actions = ttk.LabelFrame(parent, text="Actions", padding=6)
+        actions.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+
+        self.generate_button = ttk.Button(
+            actions,
+            text="Generate CNF",
+            command=self.generate_cnf,
+            style="Generate.TButton",
+        )
+        self.solve_button = ttk.Button(
+            actions,
+            text="Solve",
+            command=self.solve_current,
+            style="Primary.TButton",
+        )
+        self.save_cnf_button = ttk.Button(
+            actions,
+            text="Save CNF",
+            command=self.save_cnf_dialog,
+            style="Export.TButton",
+        )
+        self.load_dimacs_button = ttk.Button(
+            actions,
+            text="Load DIMACS",
+            command=self.load_dimacs_dialog,
+            style="Export.TButton",
+        )
+
+        self.generate_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.solve_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.save_cnf_button.grid(row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.load_dimacs_button.grid(row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+
+    def _build_solve_jobs_panel(self, parent, row: int) -> None:
+        panel = ttk.LabelFrame(parent, text="Solve Jobs", padding=6)
+        panel.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        panel.columnconfigure(0, weight=1)
+
+        self.solve_jobs_table = self._build_job_table(panel, self._on_solve_job_selected)
+        solve_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.solve_jobs_table.yview)
+        self.solve_jobs_table.configure(yscrollcommand=solve_scroll.set)
+        self.solve_jobs_table.grid(row=0, column=0, columnspan=3, sticky="ew")
+        solve_scroll.grid(row=0, column=3, sticky="ns")
+        self.solve_jobs_scrollbar = solve_scroll
+
+        self.solve_cancel_button = ttk.Button(
+            panel,
+            text="Cancel Selected",
+            command=self.cancel_selected_solve_job,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+        self.solve_load_button = ttk.Button(
+            panel,
+            text="Load Selected",
+            command=self.load_selected_solve_job,
+            state=tk.DISABLED,
+            style="Primary.TButton",
+        )
+        self.solve_clear_finished_button = ttk.Button(
+            panel,
+            text="Clear Finished",
+            command=self.clear_finished_solve_jobs,
+            state=tk.DISABLED,
+        )
+        self.solve_delete_button = ttk.Button(
+            panel,
+            text="Delete Selected",
+            command=self.delete_selected_solve_job,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+        self.solve_cancel_button.grid(row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.solve_load_button.grid(row=1, column=1, sticky="ew", padx=3, pady=(6, 0))
+        self.solve_clear_finished_button.grid(row=1, column=2, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.solve_delete_button.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+
+    def _build_job_table(self, parent, select_callback):
+        table = ttk.Treeview(parent, columns=("label", "status", "progress"), show="headings", height=4)
+        headings = {
+            "label": "Job",
+            "status": "Status",
+            "progress": "Progress",
+        }
+        widths = {
+            "label": 210,
+            "status": 120,
+            "progress": 80,
+        }
+        for column in ("label", "status", "progress"):
+            table.heading(column, text=headings[column])
+            table.column(column, width=widths[column])
+        table.bind("<<TreeviewSelect>>", select_callback)
+        return table
 
     def _build_solve_detail_panel(self) -> None:
         self.solve_detail_frame = ttk.LabelFrame(self.solve_tab, text="Problem Info", padding=8)
@@ -710,6 +1168,95 @@ class SATApp:
 
         ttk.Label(parent, text="Random seed").grid(row=start_row + 4, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+    def _build_cdcl_option_group(
+        self,
+        parent,
+        row: int,
+        branching_var,
+        phase_var,
+        restarts_var,
+        restart_interval_var,
+        learned_limit_var,
+        random_seed_var,
+        width: int,
+    ):
+        frame = ttk.LabelFrame(parent, text="CDCL Options", padding=6)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        frame.columnconfigure(1, weight=1)
+        self._build_cdcl_option_controls(
+            frame,
+            0,
+            branching_var,
+            phase_var,
+            restarts_var,
+            restart_interval_var,
+            learned_limit_var,
+            random_seed_var,
+            width,
+        )
+        return frame
+
+    def _build_walksat_option_controls(
+        self,
+        parent,
+        start_row: int,
+        max_tries_var,
+        max_flips_var,
+        noise_var,
+        random_seed_var,
+        width: int,
+    ) -> None:
+        ttk.Label(parent, text="Max tries").grid(row=start_row, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=max_tries_var, width=width).grid(row=start_row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Max flips").grid(row=start_row + 1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=max_flips_var, width=width).grid(row=start_row + 1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Noise").grid(row=start_row + 2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=noise_var, width=width).grid(row=start_row + 2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Random seed").grid(row=start_row + 3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+    def _build_walksat_option_group(
+        self,
+        parent,
+        row: int,
+        max_tries_var,
+        max_flips_var,
+        noise_var,
+        random_seed_var,
+        width: int,
+    ):
+        frame = ttk.LabelFrame(parent, text="WalkSAT Options", padding=6)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        frame.columnconfigure(1, weight=1)
+        self._build_walksat_option_controls(
+            frame,
+            0,
+            max_tries_var,
+            max_flips_var,
+            noise_var,
+            random_seed_var,
+            width,
+        )
+        return frame
+
+    def _build_solver_guide(self, parent, row: int | None = None, wraplength: int = 250):
+        frame = ttk.LabelFrame(parent, text="Solver Guide", padding=6)
+        frame.columnconfigure(1, weight=1)
+        guide_lines = []
+
+        for index, (name, description) in enumerate(SOLVER_GUIDE_ROWS):
+            ttk.Label(frame, text=name, width=8).grid(row=index, column=0, sticky="nw", pady=1)
+            ttk.Label(frame, text=description, wraplength=wraplength, justify="left").grid(row=index, column=1, sticky="ew", padx=(8, 0), pady=1)
+            guide_lines.append(f"{name}: {description}")
+
+        frame.guide_text = "\n".join(guide_lines)
+        if row is not None:
+            frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        return frame
 
     def _refresh_solver_log_controls(self) -> None:
         if self.advanced_solver_logs.get():
@@ -1031,6 +1578,10 @@ class SATApp:
             self.cdcl_restart_interval.get(),
             self.cdcl_learned_clause_limit.get(),
             self.cdcl_random_seed.get(),
+            self.walksat_max_tries.get(),
+            self.walksat_max_flips.get(),
+            self.walksat_noise.get(),
+            self.walksat_random_seed.get(),
         )
 
     def _benchmark_logging_options_from_form(self) -> dict:
@@ -1043,6 +1594,10 @@ class SATApp:
             self.bench_cdcl_restart_interval.get(),
             self.bench_cdcl_learned_clause_limit.get(),
             self.bench_cdcl_random_seed.get(),
+            self.bench_walksat_max_tries.get(),
+            self.bench_walksat_max_flips.get(),
+            self.bench_walksat_noise.get(),
+            self.bench_walksat_random_seed.get(),
         )
 
     def _logging_options(
@@ -1055,6 +1610,10 @@ class SATApp:
         restart_interval: str = "100",
         learned_clause_limit: str = "",
         random_seed: str = "",
+        walksat_max_tries: str = "10",
+        walksat_max_flips: str = "10000",
+        walksat_noise: str = "0.5",
+        walksat_random_seed: str = "",
     ) -> dict:
         if not enabled:
             options = {"mode": "normal"}
@@ -1068,6 +1627,11 @@ class SATApp:
         options["restart_interval"] = self._optional_int_text(restart_interval) if restarts_enabled else None
         options["learned_clause_limit"] = self._optional_int_text(learned_clause_limit)
         options["random_seed"] = self._optional_int_text(random_seed)
+        options["cdcl_random_seed"] = options["random_seed"]
+        options["walksat_max_tries"] = self._positive_int_text(walksat_max_tries)
+        options["walksat_max_flips"] = self._positive_int_text(walksat_max_flips)
+        options["walksat_noise"] = self._probability_text(walksat_noise)
+        options["walksat_random_seed"] = self._optional_int_text(walksat_random_seed)
         return options
 
     def _optional_int_text(self, text: str) -> int | None:
@@ -1077,10 +1641,27 @@ class SATApp:
         value = int(raw)
         return value if value > 0 else None
 
+    def _positive_int_text(self, text: str) -> int:
+        value = int(str(text).strip())
+        if value <= 0:
+            raise ValueError("WalkSAT numeric limits must be positive")
+        return value
+
+    def _probability_text(self, text: str) -> float:
+        value = float(str(text).strip())
+        if value < 0 or value > 1:
+            raise ValueError("WalkSAT noise must be between 0 and 1")
+        return value
+
     def generate_cnf(self) -> None:
         try:
             snapshot = self._problem_snapshot_from_form()
-            self._start_process_worker(f"Generating CNF for {snapshot['kind']}", generate_cnf_process, snapshot)
+            self._start_process_worker(
+                f"Generating CNF for {snapshot['kind']}",
+                generate_cnf_process,
+                snapshot,
+                kind="generate",
+            )
         except Exception as exc:
             messagebox.showerror("Cannot generate CNF", str(exc))
 
@@ -1097,6 +1678,7 @@ class SATApp:
                 solver_name,
                 logging_options,
                 timeout_seconds,
+                kind="solve",
             )
         except Exception as exc:
             messagebox.showerror("Cannot solve problem", str(exc))
@@ -1208,7 +1790,7 @@ class SATApp:
             f"Variables: {result.variables}",
         ]
 
-        for key in ("decisions", "conflicts", "propagations", "learned_clauses"):
+        for key in ("decisions", "conflicts", "propagations", "learned_clauses", "tries", "flips", "best_unsatisfied"):
             if key in result.stats:
                 lines.append(f"{key.replace('_', ' ').title()}: {result.stats[key]}")
 
@@ -1366,7 +1948,7 @@ class SATApp:
 
     def _build_benchmark_tab(self) -> None:
         self.benchmark_tab.columnconfigure(1, weight=1)
-        self.benchmark_tab.columnconfigure(2, weight=0, minsize=420)
+        self.benchmark_tab.columnconfigure(2, weight=0, minsize=340)
         self.benchmark_tab.rowconfigure(1, weight=1)
 
         self.benchmark_controls = ttk.LabelFrame(self.benchmark_tab, text="Benchmark", padding=8)
@@ -1387,6 +1969,7 @@ class SATApp:
         self.bench_seed = tk.StringVar(value="1")
         self.bench_cdcl = tk.BooleanVar(value=True)
         self.bench_dpll = tk.BooleanVar(value=False)
+        self.bench_walksat = tk.BooleanVar(value=False)
         self.bench_advanced_solver_logs = tk.BooleanVar(value=False)
         self.bench_solver_log_level = tk.StringVar(value="Periodic progress")
         self.bench_cdcl_branching = tk.StringVar(value="VSIDS")
@@ -1395,6 +1978,10 @@ class SATApp:
         self.bench_cdcl_restart_interval = tk.StringVar(value="100")
         self.bench_cdcl_learned_clause_limit = tk.StringVar(value="")
         self.bench_cdcl_random_seed = tk.StringVar(value="")
+        self.bench_walksat_max_tries = tk.StringVar(value="10")
+        self.bench_walksat_max_flips = tk.StringVar(value="10000")
+        self.bench_walksat_noise = tk.StringVar(value="0.5")
+        self.bench_walksat_random_seed = tk.StringVar(value="")
         self.bench_sudoku_size_vars = {
             size: tk.BooleanVar(value=size in (4, 9))
             for size in SUDOKU_BENCHMARK_SIZES
@@ -1430,17 +2017,28 @@ class SATApp:
         ttk.Label(self.benchmark_controls, text="Timeout (s)").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(self.benchmark_controls, textvariable=self.bench_timeout_seconds, width=18).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Checkbutton(self.benchmark_controls, text="CDCL", variable=self.bench_cdcl).grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(self.benchmark_controls, text="DPLL", variable=self.bench_dpll).grid(row=5, column=1, sticky="w", pady=(8, 0))
+        self._build_benchmark_action_buttons(row=5)
+        self._build_benchmark_jobs_panel(row=6)
+
+        solver_frame = ttk.LabelFrame(self.benchmark_controls, text="Solvers", padding=6)
+        solver_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        solver_frame.columnconfigure(0, weight=1)
+        solver_frame.columnconfigure(1, weight=1)
+        solver_frame.columnconfigure(2, weight=1)
+        ttk.Checkbutton(solver_frame, text="CDCL", variable=self.bench_cdcl).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(solver_frame, text="DPLL", variable=self.bench_dpll).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(solver_frame, text="WalkSAT", variable=self.bench_walksat).grid(row=0, column=2, sticky="w")
+        self.benchmark_solver_guide = self._build_solver_guide(solver_frame, row=None, wraplength=190)
+        self.benchmark_solver_guide.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
         ttk.Checkbutton(
             self.benchmark_controls,
             text="Advanced solver logs",
             variable=self.bench_advanced_solver_logs,
             command=self._refresh_benchmark_log_controls,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.bench_log_label = ttk.Label(self.benchmark_controls, text="Log detail")
-        self.bench_log_label.grid(row=7, column=0, sticky="w", pady=(8, 0))
+        self.bench_log_label.grid(row=9, column=0, sticky="w", pady=(8, 0))
         self.bench_log_box = ttk.Combobox(
             self.benchmark_controls,
             textvariable=self.bench_solver_log_level,
@@ -1448,10 +2046,10 @@ class SATApp:
             state=tk.DISABLED,
             width=16,
         )
-        self.bench_log_box.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        self._build_cdcl_option_controls(
+        self.bench_log_box.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.benchmark_cdcl_options_frame = self._build_cdcl_option_group(
             self.benchmark_controls,
-            8,
+            10,
             self.bench_cdcl_branching,
             self.bench_cdcl_initial_phase,
             self.bench_cdcl_restarts,
@@ -1460,64 +2058,43 @@ class SATApp:
             self.bench_cdcl_random_seed,
             width=16,
         )
+        self.benchmark_walksat_options_frame = self._build_walksat_option_group(
+            self.benchmark_controls,
+            11,
+            self.bench_walksat_max_tries,
+            self.bench_walksat_max_flips,
+            self.bench_walksat_noise,
+            self.bench_walksat_random_seed,
+            width=16,
+        )
 
-        self.run_benchmark_button = ttk.Button(
-            self.benchmark_controls,
-            text="Run Benchmark",
-            command=self.run_benchmark,
-            style="Primary.TButton",
-        )
-        self.skip_benchmark_button = ttk.Button(
-            self.benchmark_controls,
-            text="Skip Current",
-            command=self.skip_current_benchmark_case,
-            state=tk.DISABLED,
-            style="Warning.TButton",
-        )
-        self.export_csv_button = ttk.Button(
-            self.benchmark_controls,
-            text="Export CSV",
-            command=self.export_benchmark_csv,
-            style="Export.TButton",
-        )
-        self.export_chart_button = ttk.Button(
-            self.benchmark_controls,
-            text="Export Chart",
-            command=self.export_benchmark_chart,
-            style="Export.TButton",
-        )
-        self.run_benchmark_button.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        self.skip_benchmark_button.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.export_csv_button.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.export_chart_button.grid(row=16, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.controls_to_disable.extend([self.run_benchmark_button, self.export_csv_button, self.export_chart_button])
-
-        ttk.Label(self.benchmark_controls, text="Metric").grid(row=17, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(self.benchmark_controls, text="Metric").grid(row=12, column=0, sticky="w", pady=(12, 0))
         ttk.Combobox(
             self.benchmark_controls,
             textvariable=self.chart_metric,
             values=("Raw Time", "Log Time", "Normalized Time", "Conflicts", "Decisions"),
             state="readonly",
             width=16,
-        ).grid(row=17, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
-        ttk.Label(self.benchmark_controls, text="View").grid(row=18, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=12, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+        ttk.Label(self.benchmark_controls, text="View").grid(row=13, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(
             self.benchmark_controls,
             textvariable=self.chart_view,
             values=("Raw runs", "Average repeats"),
             state="readonly",
             width=16,
-        ).grid(row=18, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Button(self.benchmark_controls, text="Refresh Chart", command=self.draw_benchmark_chart).grid(row=19, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ).grid(row=13, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Button(self.benchmark_controls, text="Refresh Chart", command=self.draw_benchmark_chart).grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         table_frame = ttk.Frame(self.benchmark_tab)
         table_frame.grid(row=0, column=1, sticky="nsew")
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-        columns = ("case", "type", "detail", "solver", "options", "status", "time", "conflicts", "decisions")
+        columns = ("run", "case", "type", "detail", "solver", "options", "status", "time", "conflicts", "decisions")
         self.benchmark_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
         headings = {
+            "run": "Run",
             "case": "Case",
             "type": "Type",
             "detail": "Detail",
@@ -1528,7 +2105,18 @@ class SATApp:
             "conflicts": "Conflicts",
             "decisions": "Decisions",
         }
-        widths = {"case": 240, "detail": 170, "options": 180}
+        widths = {
+            "run": 55,
+            "case": 170,
+            "type": 105,
+            "detail": 120,
+            "solver": 70,
+            "options": 120,
+            "status": 75,
+            "time": 80,
+            "conflicts": 75,
+            "decisions": 75,
+        }
         for column in columns:
             self.benchmark_table.heading(column, text=headings[column])
             self.benchmark_table.column(column, width=widths.get(column, 100))
@@ -1550,6 +2138,129 @@ class SATApp:
         self._refresh_benchmark_form()
         self._refresh_benchmark_log_controls()
 
+    def _build_benchmark_action_buttons(self, row: int) -> None:
+        actions = ttk.LabelFrame(self.benchmark_controls, text="Actions", padding=6)
+        actions.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+
+        self.run_benchmark_button = ttk.Button(
+            actions,
+            text="Run Benchmark",
+            command=self.run_benchmark,
+            style="Primary.TButton",
+        )
+        self.skip_benchmark_button = ttk.Button(
+            actions,
+            text="Skip Current",
+            command=self.skip_current_benchmark_case,
+            state=tk.DISABLED,
+            style="Warning.TButton",
+        )
+        self.export_csv_button = ttk.Button(
+            actions,
+            text="Export CSV",
+            command=self.export_benchmark_csv,
+            style="Export.TButton",
+        )
+        self.export_chart_button = ttk.Button(
+            actions,
+            text="Export Chart",
+            command=self.export_benchmark_chart,
+            style="Export.TButton",
+        )
+        self.clear_benchmark_table_button = ttk.Button(
+            actions,
+            text="Clear Table",
+            command=self.clear_benchmark_table,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+
+        self.run_benchmark_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.skip_benchmark_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.export_csv_button.grid(row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.export_chart_button.grid(row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.clear_benchmark_table_button.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+    def _build_benchmark_jobs_panel(self, row: int) -> None:
+        panel = ttk.LabelFrame(self.benchmark_controls, text="Benchmark Jobs", padding=6)
+        panel.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
+
+        self.benchmark_jobs_table = self._build_job_table(panel, self._on_benchmark_job_selected)
+        benchmark_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.benchmark_jobs_table.yview)
+        self.benchmark_jobs_table.configure(yscrollcommand=benchmark_scroll.set)
+        self.benchmark_jobs_table.grid(row=0, column=0, columnspan=2, sticky="ew")
+        benchmark_scroll.grid(row=0, column=2, sticky="ns")
+        self.benchmark_jobs_scrollbar = benchmark_scroll
+
+        self.benchmark_cancel_button = ttk.Button(
+            panel,
+            text="Cancel Selected",
+            command=self.cancel_selected_benchmark_job,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+        self.benchmark_skip_job_button = ttk.Button(
+            panel,
+            text="Skip Selected Case",
+            command=self.skip_current_benchmark_case,
+            state=tk.DISABLED,
+            style="Warning.TButton",
+        )
+        self.benchmark_show_selected_button = ttk.Button(
+            panel,
+            text="Show Selected Run",
+            command=self.show_selected_benchmark_run,
+            state=tk.DISABLED,
+            style="Primary.TButton",
+        )
+        self.benchmark_show_all_button = ttk.Button(
+            panel,
+            text="Show All Runs",
+            command=self.show_all_benchmark_runs,
+            state=tk.DISABLED,
+        )
+        self.benchmark_clear_finished_jobs_button = ttk.Button(
+            panel,
+            text="Clear Finished Jobs",
+            command=self.clear_finished_benchmark_jobs,
+            state=tk.DISABLED,
+        )
+        self.benchmark_clear_selected_results_button = ttk.Button(
+            panel,
+            text="Clear Selected Results",
+            command=self.clear_selected_benchmark_run_results,
+            state=tk.DISABLED,
+        )
+        self.benchmark_clear_all_results_button = ttk.Button(
+            panel,
+            text="Clear All Results",
+            command=self.clear_all_benchmark_results,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+        self.benchmark_delete_job_button = ttk.Button(
+            panel,
+            text="Delete Selected Job",
+            command=self.delete_selected_benchmark_job,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
+
+        self.benchmark_cancel_button.grid(row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.benchmark_skip_job_button.grid(row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_show_selected_button.grid(row=2, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.benchmark_show_all_button.grid(row=2, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_clear_finished_jobs_button.grid(row=3, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.benchmark_clear_selected_results_button.grid(row=3, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_delete_job_button.grid(row=4, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.benchmark_clear_all_results_button.grid(row=4, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_status = tk.StringVar(value="Showing all benchmark rows.")
+        ttk.Label(panel, textvariable=self.benchmark_status, wraplength=230).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
     def _build_benchmark_detail_panel(self) -> None:
         self.benchmark_detail_frame = ttk.LabelFrame(self.benchmark_tab, text="Selected Case", padding=8)
         self.benchmark_detail_frame.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(10, 0))
@@ -1562,7 +2273,7 @@ class SATApp:
         summary_frame.rowconfigure(1, weight=1)
         summary_frame.columnconfigure(0, weight=1)
         ttk.Label(summary_frame, text="Stats and response").grid(row=0, column=0, sticky="w")
-        self.benchmark_detail_text = tk.Text(summary_frame, height=8, width=42, wrap=tk.WORD)
+        self.benchmark_detail_text = tk.Text(summary_frame, height=8, width=34, wrap=tk.WORD)
         self.benchmark_detail_text.grid(row=1, column=0, sticky="nsew")
         detail_scroll = ttk.Scrollbar(summary_frame, orient=tk.VERTICAL, command=self.benchmark_detail_text.yview)
         detail_scroll.grid(row=1, column=1, sticky="ns")
@@ -1588,7 +2299,7 @@ class SATApp:
         self.benchmark_detail_notebook.add(edge_frame, text="Input")
         self.benchmark_input_label = tk.StringVar(value="Problem data")
         ttk.Label(edge_frame, textvariable=self.benchmark_input_label).grid(row=0, column=0, sticky="w")
-        self.benchmark_edge_text = tk.Text(edge_frame, height=14, width=42, wrap=tk.WORD)
+        self.benchmark_edge_text = tk.Text(edge_frame, height=14, width=34, wrap=tk.WORD)
         self.benchmark_edge_text.grid(row=1, column=0, sticky="nsew")
         edge_scroll = ttk.Scrollbar(edge_frame, orient=tk.VERTICAL, command=self.benchmark_edge_text.yview)
         edge_scroll.grid(row=1, column=1, sticky="ns")
@@ -1600,7 +2311,7 @@ class SATApp:
         preview_frame.columnconfigure(0, weight=1)
         self.benchmark_detail_notebook.add(preview_frame, text="Graph")
         self.graph_preview_status = tk.StringVar(value="Select a graph benchmark row to preview it.")
-        ttk.Label(preview_frame, textvariable=self.graph_preview_status, wraplength=360).grid(row=0, column=0, sticky="ew")
+        ttk.Label(preview_frame, textvariable=self.graph_preview_status, wraplength=300).grid(row=0, column=0, sticky="ew")
         self.render_graph_button = ttk.Button(
             preview_frame,
             text="Refresh graph",
@@ -1731,6 +2442,8 @@ class SATApp:
                 solvers.append("CDCL")
             if self.bench_dpll.get():
                 solvers.append("DPLL")
+            if self.bench_walksat.get():
+                solvers.append("WalkSAT")
             if not solvers:
                 raise ValueError("Select at least one solver")
 
@@ -1814,28 +2527,112 @@ class SATApp:
                     "timeout_seconds": timeout_seconds,
                 }
 
-            self.benchmark_rows = []
-            self._fill_benchmark_table()
-            self.pending_chart_refresh = True
-
             skip_event = mp.Event()
-            self._start_process_worker(
+            job = self._start_process_worker(
                 f"Benchmarking {total_runs} solver runs",
                 benchmark_process,
                 params,
                 extra_events=(skip_event,),
                 benchmark_skip_event=skip_event,
+                kind="benchmark",
             )
+            job.pending_chart_refresh = True
         except Exception as exc:
             messagebox.showerror("Benchmark failed", str(exc))
 
+    def _visible_benchmark_rows(self) -> list[BenchmarkRow]:
+        if self.benchmark_filter_run_label is None:
+            return list(self.benchmark_rows)
+        return [
+            row
+            for row in self.benchmark_rows
+            if row.run_label == self.benchmark_filter_run_label
+        ]
+
+    def _set_benchmark_status(self, message: str) -> None:
+        if hasattr(self, "benchmark_status"):
+            self.benchmark_status.set(message)
+
+    def _schedule_benchmark_chart_refresh(self) -> None:
+        if self.pending_benchmark_chart_after_id is not None:
+            try:
+                self.root.after_cancel(self.pending_benchmark_chart_after_id)
+            except tk.TclError:
+                pass
+        self._set_benchmark_status("Drawing chart...")
+        self.pending_benchmark_chart_after_id = self.root.after(50, self._run_deferred_benchmark_chart_refresh)
+
+    def _run_deferred_benchmark_chart_refresh(self) -> None:
+        self.pending_benchmark_chart_after_id = None
+        self.draw_benchmark_chart()
+        visible_count = len(self._visible_benchmark_rows())
+        if self.benchmark_filter_run_label is None:
+            self._set_benchmark_status(f"Showing all benchmark rows ({visible_count}).")
+        else:
+            self._set_benchmark_status(f"Showing {self.benchmark_filter_run_label} ({visible_count} rows).")
+
+    def show_selected_benchmark_run(self) -> None:
+        job = self._selected_benchmark_job()
+        if job is None:
+            return
+        self._set_benchmark_status(f"Showing {job.label}...")
+        self.benchmark_filter_run_label = job.label
+        self._fill_benchmark_table()
+        self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
+
+    def show_all_benchmark_runs(self) -> None:
+        self._set_benchmark_status("Showing all runs...")
+        self.benchmark_filter_run_label = None
+        self._fill_benchmark_table()
+        self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
+
+    def clear_selected_benchmark_run_results(self) -> None:
+        job = self._selected_benchmark_job()
+        if job is None:
+            return
+        run_label = job.label
+        self.benchmark_rows = [
+            row
+            for row in self.benchmark_rows
+            if row.run_label != run_label
+        ]
+        job.rows = []
+        if self.benchmark_filter_run_label == run_label:
+            self.benchmark_filter_run_label = None
+        self._set_benchmark_status(f"Cleared {run_label} results.")
+        self._fill_benchmark_table()
+        self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
+
+    def clear_all_benchmark_results(self) -> None:
+        self.clear_benchmark_table()
+
+    def clear_benchmark_table(self) -> None:
+        self.benchmark_rows = []
+        for job in self.jobs.values():
+            if job.kind == "benchmark":
+                job.rows = []
+        self.benchmark_filter_run_label = None
+        self._set_benchmark_status("Benchmark table cleared.")
+        self._fill_benchmark_table()
+        self.draw_benchmark_chart()
+        self._refresh_job_buttons()
+
     def _fill_benchmark_table(self) -> None:
+        self._set_benchmark_status("Refreshing table...")
         self.benchmark_row_by_item = {}
         for item in self.benchmark_table.get_children():
             self.benchmark_table.delete(item)
 
-        for row in self.benchmark_rows:
+        for row in self._visible_benchmark_rows():
             self._insert_benchmark_row(row)
+        visible_count = len(self._visible_benchmark_rows())
+        if self.benchmark_filter_run_label is None:
+            self._set_benchmark_status(f"Showing all benchmark rows ({visible_count}).")
+        else:
+            self._set_benchmark_status(f"Showing {self.benchmark_filter_run_label} ({visible_count} rows).")
         self.selected_benchmark_row = None
         if hasattr(self, "benchmark_detail_text"):
             self._write_text_widget(self.benchmark_detail_text, "Select a benchmark row to see its stats and response.")
@@ -1847,6 +2644,7 @@ class SATApp:
             "",
             tk.END,
             values=(
+                row.run_label,
                 row.case_name,
                 row.problem_type,
                 row.detail,
@@ -1912,6 +2710,8 @@ class SATApp:
             f"Propagations: {row.propagations}",
             f"Learned clauses: {row.learned_clauses}",
         ]
+        if row.run_label:
+            lines.insert(0, f"Run: {row.run_label}")
         if row.solver_options:
             lines.append(f"Solver options: {row.solver_options}")
 
@@ -2137,7 +2937,7 @@ class SATApp:
             return
 
         self._clear_benchmark_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
-        figure = Figure(figsize=(4.4, 2.6), dpi=100)
+        figure = Figure(figsize=(3.6, 2.3), dpi=100)
         axis = figure.add_subplot(111)
         positions = self._circular_graph_positions(nodes)
         edges = sorted((int(u), int(v)) for u, v in row.graph_edges)
@@ -2314,7 +3114,12 @@ class SATApp:
         return {node: str(node) for node in range(1, node_count + 1)}
 
     def draw_benchmark_chart(self) -> None:
-        if not self.benchmark_rows:
+        rows = self._visible_benchmark_rows()
+        if not rows:
+            if self.benchmark_canvas is not None:
+                self.benchmark_canvas.get_tk_widget().destroy()
+                self.benchmark_canvas = None
+                self.benchmark_figure = None
             return
 
         if Figure is None or FigureCanvasTkAgg is None:
@@ -2333,7 +3138,7 @@ class SATApp:
             axis.set_yscale("log")
 
         if self.chart_view.get() == "Average repeats":
-            groups = self._aggregate_benchmark_rows(self.benchmark_rows)
+            groups = self._aggregate_benchmark_rows(rows)
             self._draw_aggregate_bars(axis, groups, metric)
             labels = [group["label"] for group in groups]
             x = list(range(len(groups)))
@@ -2343,16 +3148,16 @@ class SATApp:
                     if status not in statuses:
                         statuses.append(status)
         else:
-            x = list(range(len(self.benchmark_rows)))
-            labels = [self._benchmark_chart_label(row) for row in self.benchmark_rows]
-            y = [self._benchmark_metric_value(row, metric) for row in self.benchmark_rows]
+            x = list(range(len(rows)))
+            labels = [self._benchmark_chart_label(row) for row in rows]
+            y = [self._benchmark_metric_value(row, metric) for row in rows]
             if metric == "Log Time":
                 y = [max(value, 1e-9) for value in y]
-            colors = [self._benchmark_bar_color(row.status) for row in self.benchmark_rows]
+            colors = [self._benchmark_bar_color(row.status) for row in rows]
             axis.bar(x, y, color=colors)
-            statuses = [row.status for row in self.benchmark_rows]
+            statuses = [row.status for row in rows]
 
-        axis.set_title(self._benchmark_chart_title(metric))
+        axis.set_title(self._benchmark_chart_title(metric, rows))
         axis.set_ylabel(ylabel)
         axis.set_xticks(x)
         axis.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
@@ -2379,10 +3184,12 @@ class SATApp:
         problem_prefix = f"{row.problem_type} "
         if case_name.startswith(problem_prefix):
             case_name = case_name[len(problem_prefix):]
-        return f"{case_name}\n{row.solver}"
+        prefix = f"{row.run_label}\n" if row.run_label else ""
+        return f"{prefix}{case_name}\n{row.solver}"
 
     def _benchmark_group_key(self, row: BenchmarkRow) -> tuple:
         return (
+            row.run_label,
             row.problem_type,
             row.case_name,
             row.solver,
@@ -2497,13 +3304,16 @@ class SATApp:
             )
         axis.margins(y=0.25)
 
-    def _benchmark_chart_title(self, metric: str) -> str:
+    def _benchmark_chart_title(self, metric: str, rows: list[BenchmarkRow] | None = None) -> str:
+        rows = self.benchmark_rows if rows is None else rows
         problem_types = []
-        for row in self.benchmark_rows:
+        for row in rows:
             if row.problem_type not in problem_types:
                 problem_types.append(row.problem_type)
 
         suffix = " (Average repeats)" if hasattr(self, "chart_view") and self.chart_view.get() == "Average repeats" else ""
+        if self.benchmark_filter_run_label is not None:
+            suffix = f"{suffix} - {self.benchmark_filter_run_label}"
         if len(problem_types) == 1:
             return f"{problem_types[0]} - {metric}{suffix}"
         if problem_types:

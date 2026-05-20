@@ -11,6 +11,11 @@ Positive `x` means variable `x` is true. Negative `-x` means variable `x` is
 false. A clause is satisfied when at least one of its literals is true. The
 whole formula is satisfied when every clause is satisfied.
 
+Related solver notes:
+
+- [DPLL](dpll.md) explains the complete recursive baseline.
+- [WalkSAT](walksat.md) explains the incomplete local-search solver.
+
 ## DPLL vs CDCL
 
 DPLL tries a value, simplifies the formula, and backtracks when it reaches a
@@ -128,9 +133,36 @@ decision level `0` while keeping learned clauses, activity scores, and saved
 phases. This can help CDCL escape unlucky branches.
 
 Learned clause deletion can be enabled with a learned-clause limit. Original
-clauses are never removed. The solver prefers deleting longer and older learned
-clauses, while keeping clauses that are currently used as propagation reasons.
-This keeps the watched-literal state smaller on long runs.
+clauses are never removed. The solver keeps learned clauses that are currently
+used as propagation reasons, because those clauses are locked by active
+assignments.
+
+## LBD / Glue
+
+LBD means Literal Block Distance. It is also called glue value. For a learned
+clause, LBD is the number of different decision levels touched by the clause.
+
+Example:
+
+```text
+literal levels: 8, 8, 5, 2
+LBD: 3
+```
+
+Low-LBD clauses are usually valuable because they connect only a few decision
+levels. These clauses often become useful propagators after backjumping.
+
+When the learned-clause database is above the configured limit, this solver
+keeps:
+
+- locked learned clauses
+- binary learned clauses
+- low-LBD learned clauses
+
+It deletes worse unlocked clauses first: high LBD, longer length, older or less
+recently useful. Watch lists are not rebuilt globally during search; deleted
+clauses are removed from the existing watch lists so active propagation state
+stays stable.
 
 The random seed affects random branching and random phase choices. Reusing the
 same seed should make those heuristic choices reproducible.

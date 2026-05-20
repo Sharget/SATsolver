@@ -73,9 +73,11 @@ class BenchmarkRow:
     solver_options: str = ""
     problem_metadata: dict[str, Any] = field(default_factory=dict)
     problem_clauses: list[list[int]] = field(default_factory=list)
+    run_label: str = ""
 
     def as_csv_row(self) -> list[Any]:
         return [
+            self.run_label,
             self.case_name,
             self.problem_type,
             self.detail,
@@ -96,6 +98,7 @@ class BenchmarkRow:
 
 
 BENCHMARK_HEADERS = [
+    "run",
     "case_name",
     "problem_type",
     "detail",
