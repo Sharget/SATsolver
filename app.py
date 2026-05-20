@@ -95,7 +95,7 @@ class SATApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("SAT Problem Solver")
-        self.root.geometry("1650x980")
+        self.root.geometry("1500x900")
 
         INPUT_GENERATED.mkdir(parents=True, exist_ok=True)
         BENCHMARK_OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -119,21 +119,90 @@ class SATApp:
         self.pending_chart_refresh = False
         self.controls_to_disable = []
 
+        self._configure_styles()
         self._build_layout()
         self.root.after(100, self._poll_run_events)
 
+    def _configure_styles(self) -> None:
+        self.style = ttk.Style(self.root)
+        button_styles = {
+            "Primary.TButton": ("#dbeafe", "#1d4ed8", "#bfdbfe"),
+            "Generate.TButton": ("#dcfce7", "#166534", "#bbf7d0"),
+            "Export.TButton": ("#fef3c7", "#92400e", "#fde68a"),
+            "Warning.TButton": ("#ffedd5", "#9a3412", "#fed7aa"),
+            "Danger.TButton": ("#fee2e2", "#991b1b", "#fecaca"),
+        }
+
+        for style_name, (background, foreground, active_background) in button_styles.items():
+            self.style.configure(
+                style_name,
+                background=background,
+                foreground=foreground,
+                padding=(8, 4),
+            )
+            self.style.map(
+                style_name,
+                background=[
+                    ("disabled", "#e5e7eb"),
+                    ("pressed", active_background),
+                    ("active", active_background),
+                    ("!disabled", background),
+                ],
+                foreground=[
+                    ("disabled", "#6b7280"),
+                    ("!disabled", foreground),
+                ],
+            )
+
     def _build_layout(self) -> None:
         self.notebook = ttk.Notebook(self.root)
-        self.solve_tab = ttk.Frame(self.notebook, padding=10)
-        self.benchmark_tab = ttk.Frame(self.notebook, padding=10)
-
-        self.notebook.add(self.solve_tab, text="Solve")
-        self.notebook.add(self.benchmark_tab, text="Benchmarks")
+        self.solve_tab = self._build_scrollable_tab("Solve")
+        self.benchmark_tab = self._build_scrollable_tab("Benchmarks")
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self._build_solve_tab()
         self._build_benchmark_tab()
         self._build_runtime_panel()
+
+    def _build_scrollable_tab(self, title: str) -> ttk.Frame:
+        tab = ttk.Frame(self.notebook)
+        tab.rowconfigure(0, weight=1)
+        tab.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(tab, highlightthickness=0, borderwidth=0)
+        yscroll = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+        xscroll = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=canvas.xview)
+        canvas.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+
+        canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+
+        content = ttk.Frame(canvas, padding=10)
+        content_window = canvas.create_window(0, 0, window=content, anchor="nw")
+
+        def update_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def resize_content(event) -> None:
+            requested_width = content.winfo_reqwidth()
+            canvas.itemconfigure(content_window, width=max(event.width, requested_width))
+            update_scroll_region()
+
+        def scroll_page(event) -> str:
+            if event.state & 0x0001:
+                canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        content.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", resize_content)
+        canvas.bind("<MouseWheel>", scroll_page)
+        content.bind("<MouseWheel>", scroll_page)
+
+        self.notebook.add(tab, text=title)
+        return content
 
     def _build_runtime_panel(self) -> None:
         panel = ttk.LabelFrame(self.root, text="Run Feed", padding=8)
@@ -147,7 +216,13 @@ class SATApp:
         self.progress_bar = ttk.Progressbar(panel, variable=self.progress_value, maximum=100)
         self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(8, 8))
 
-        self.cancel_button = ttk.Button(panel, text="Cancel", command=self.cancel_active_run, state=tk.DISABLED)
+        self.cancel_button = ttk.Button(
+            panel,
+            text="Cancel",
+            command=self.cancel_active_run,
+            state=tk.DISABLED,
+            style="Danger.TButton",
+        )
         self.cancel_button.grid(row=0, column=2, padx=(0, 6))
         ttk.Button(panel, text="Clear Feed", command=self.clear_feed).grid(row=0, column=3)
 
@@ -484,10 +559,30 @@ class SATApp:
 
         buttons = ttk.Frame(left)
         buttons.pack(fill=tk.X, pady=(10, 0))
-        self.generate_button = ttk.Button(buttons, text="Generate CNF", command=self.generate_cnf)
-        self.solve_button = ttk.Button(buttons, text="Solve", command=self.solve_current)
-        self.save_cnf_button = ttk.Button(buttons, text="Save CNF", command=self.save_cnf_dialog)
-        self.load_dimacs_button = ttk.Button(buttons, text="Load DIMACS", command=self.load_dimacs_dialog)
+        self.generate_button = ttk.Button(
+            buttons,
+            text="Generate CNF",
+            command=self.generate_cnf,
+            style="Generate.TButton",
+        )
+        self.solve_button = ttk.Button(
+            buttons,
+            text="Solve",
+            command=self.solve_current,
+            style="Primary.TButton",
+        )
+        self.save_cnf_button = ttk.Button(
+            buttons,
+            text="Save CNF",
+            command=self.save_cnf_dialog,
+            style="Export.TButton",
+        )
+        self.load_dimacs_button = ttk.Button(
+            buttons,
+            text="Load DIMACS",
+            command=self.load_dimacs_dialog,
+            style="Export.TButton",
+        )
 
         for button, padding in [
             (self.generate_button, 0),
@@ -646,25 +741,69 @@ class SATApp:
         size_box.bind("<<ComboboxSelected>>", lambda _event: self._build_sudoku_grid())
         ttk.Button(top, text="Clear", command=lambda: self._build_sudoku_grid()).pack(side=tk.RIGHT)
 
-        self.sudoku_grid_frame = ttk.Frame(self.problem_form)
-        self.sudoku_grid_frame.pack(pady=(10, 0))
+        self.sudoku_viewport = ttk.Frame(self.problem_form)
+        self.sudoku_viewport.pack(anchor="nw")
+        self.sudoku_viewport.columnconfigure(0, weight=1)
+        self.sudoku_viewport.rowconfigure(0, weight=1)
+
+        self.sudoku_canvas = tk.Canvas(
+            self.sudoku_viewport,
+            width=230,
+            height=210,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.sudoku_canvas.grid(row=0, column=0, sticky="nsew")
+        sudoku_y_scroll = ttk.Scrollbar(self.sudoku_viewport, orient=tk.VERTICAL, command=self.sudoku_canvas.yview)
+        sudoku_y_scroll.grid(row=0, column=1, sticky="ns")
+        sudoku_x_scroll = ttk.Scrollbar(self.sudoku_viewport, orient=tk.HORIZONTAL, command=self.sudoku_canvas.xview)
+        sudoku_x_scroll.grid(row=1, column=0, sticky="ew")
+        self.sudoku_canvas.configure(xscrollcommand=sudoku_x_scroll.set, yscrollcommand=sudoku_y_scroll.set)
+
+        self.sudoku_grid_frame = ttk.Frame(self.sudoku_canvas)
+        self.sudoku_canvas_window = self.sudoku_canvas.create_window(
+            0,
+            0,
+            window=self.sudoku_grid_frame,
+            anchor="nw",
+        )
+        self.sudoku_grid_frame.bind("<Configure>", self._update_sudoku_scroll_region)
+        self.sudoku_canvas.bind("<MouseWheel>", self._on_sudoku_mousewheel)
+        self.sudoku_grid_frame.bind("<MouseWheel>", self._on_sudoku_mousewheel)
         self.sudoku_entries: list[list[ttk.Entry]] = []
         self._build_sudoku_grid()
+
+    def _update_sudoku_scroll_region(self, _event=None) -> None:
+        self.sudoku_canvas.configure(scrollregion=self.sudoku_canvas.bbox("all"))
+
+    def _on_sudoku_mousewheel(self, event) -> str:
+        if event.state & 0x0001:
+            self.sudoku_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        else:
+            self.sudoku_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
 
     def _build_sudoku_grid(self) -> None:
         for child in self.sudoku_grid_frame.winfo_children():
             child.destroy()
 
         size = int(self.sudoku_size.get())
+        entry_width = 2 if size >= 16 else 3
+        self.sudoku_canvas.configure(width=230, height=210)
         self.sudoku_entries = []
 
         for r in range(size):
             row_entries = []
             for c in range(size):
-                entry = ttk.Entry(self.sudoku_grid_frame, width=3, justify="center")
-                entry.grid(row=r, column=c, padx=1, pady=1)
+                entry = ttk.Entry(self.sudoku_grid_frame, width=entry_width, justify="center")
+                entry.bind("<MouseWheel>", self._on_sudoku_mousewheel)
+                entry.grid(row=r, column=c, padx=0, pady=0)
                 row_entries.append(entry)
             self.sudoku_entries.append(row_entries)
+
+        self.sudoku_canvas.xview_moveto(0)
+        self.sudoku_canvas.yview_moveto(0)
+        self.sudoku_canvas.after_idle(self._update_sudoku_scroll_region)
 
     def _build_n_queens_form(self) -> None:
         fields = ttk.Frame(self.problem_form)
@@ -1322,15 +1461,31 @@ class SATApp:
             width=16,
         )
 
-        self.run_benchmark_button = ttk.Button(self.benchmark_controls, text="Run Benchmark", command=self.run_benchmark)
+        self.run_benchmark_button = ttk.Button(
+            self.benchmark_controls,
+            text="Run Benchmark",
+            command=self.run_benchmark,
+            style="Primary.TButton",
+        )
         self.skip_benchmark_button = ttk.Button(
             self.benchmark_controls,
             text="Skip Current",
             command=self.skip_current_benchmark_case,
             state=tk.DISABLED,
+            style="Warning.TButton",
         )
-        self.export_csv_button = ttk.Button(self.benchmark_controls, text="Export CSV", command=self.export_benchmark_csv)
-        self.export_chart_button = ttk.Button(self.benchmark_controls, text="Export Chart", command=self.export_benchmark_chart)
+        self.export_csv_button = ttk.Button(
+            self.benchmark_controls,
+            text="Export CSV",
+            command=self.export_benchmark_csv,
+            style="Export.TButton",
+        )
+        self.export_chart_button = ttk.Button(
+            self.benchmark_controls,
+            text="Export Chart",
+            command=self.export_benchmark_chart,
+            style="Export.TButton",
+        )
         self.run_benchmark_button.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(12, 0))
         self.skip_benchmark_button.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.export_csv_button.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
@@ -1417,7 +1572,12 @@ class SATApp:
         benchmark_detail_buttons.columnconfigure(0, weight=1)
         benchmark_detail_buttons.columnconfigure(1, weight=1)
         ttk.Button(benchmark_detail_buttons, text="Copy response", command=self.copy_benchmark_response).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(benchmark_detail_buttons, text="Save CNF", command=self.save_selected_benchmark_cnf).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        ttk.Button(
+            benchmark_detail_buttons,
+            text="Save CNF",
+            command=self.save_selected_benchmark_cnf,
+            style="Export.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         self.benchmark_detail_notebook = ttk.Notebook(self.benchmark_detail_frame)
         self.benchmark_detail_notebook.grid(row=1, column=0, sticky="nsew")
