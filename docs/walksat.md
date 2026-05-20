@@ -95,6 +95,9 @@ print(solution)
 ## When To Use It
 
 WalkSAT is a good demonstration solver for random or large SAT-looking
-instances where a satisfying assignment probably exists. It is less useful when
-you need an UNSAT proof, because `UNKNOWN` only says the local search did not
-find a model in time.
+instances where a satisfying assignment probably exists. The app's `Random
+3-SAT` problem is especially useful for this: choose `Planted SAT` to generate
+random-looking 3-literal clauses that are guaranteed to be SAT, then vary the
+clause-to-variable ratio in benchmarks. Choose `Forced UNSAT` when you want to
+see CDCL/DPLL prove UNSAT; WalkSAT will return `UNKNOWN` unless it times out,
+because local search cannot prove unsatisfiability.

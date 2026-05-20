@@ -18,6 +18,7 @@ from problems.independent_set import (
     random_independent_set_problem,
 )
 from problems.n_queens import n_queens_problem
+from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem
 
 
@@ -28,6 +29,7 @@ PROBLEM_TYPES = {
     "Graph Coloring Exact Edges": exact_edges_graph_coloring_problem,
     "Graph Coloring Average Degree": average_degree_graph_coloring_problem,
     "N-Queens": n_queens_problem,
+    "Random 3-SAT": random_3sat_problem,
     "Hamiltonian Path Manual": manual_hamiltonian_path_problem,
     "Hamiltonian Path Random": random_hamiltonian_path_problem,
     "Hamiltonian Path Exact Edges": exact_edges_hamiltonian_path_problem,

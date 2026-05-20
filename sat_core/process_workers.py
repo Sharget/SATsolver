@@ -20,12 +20,14 @@ from problems.independent_set import (
     random_independent_set_problem,
 )
 from problems.n_queens import n_queens_problem
+from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem
 from sat_core.benchmark import (
     run_graph_coloring_sweep,
     run_hamiltonian_path_sweep,
     run_independent_set_sweep,
     run_n_queens_sweep,
+    run_random_3sat_sweep,
     run_sudoku_sweep,
 )
 from sat_core.dimacs import clauses_to_dimacs
@@ -51,6 +53,15 @@ def problem_from_snapshot(snapshot: dict) -> ProblemInstance:
 
     if kind == "N-Queens":
         return n_queens_problem(snapshot["size"])
+
+    if kind == "Random 3-SAT":
+        return random_3sat_problem(
+            snapshot["variables"],
+            snapshot["clauses"],
+            seed=snapshot["seed"],
+            planted=snapshot.get("planted", True),
+            formula_mode=snapshot.get("formula_mode"),
+        )
 
     if kind == "Graph Coloring":
         if snapshot["mode"] == "Probability":
@@ -113,6 +124,13 @@ def _problem_summary(problem: ProblemInstance) -> str:
         return f"{base}, size {problem.metadata.get('size')}x{problem.metadata.get('size')}, givens {problem.metadata.get('givens')}"
     if problem.problem_type == "N-Queens":
         return f"{base}, size {problem.metadata.get('size')}"
+    if problem.problem_type == "Random 3-SAT":
+        return (
+            f"{base}, variables {problem.metadata.get('variables')}, "
+            f"clauses {problem.metadata.get('clauses_requested')}, "
+            f"ratio {problem.metadata.get('ratio'):.2f}, "
+            f"mode {problem.metadata.get('mode')}"
+        )
     if problem.problem_type == "Independent Set":
         return f"{base}, target k {problem.metadata.get('target')}, edges {problem.metadata.get('edges')}"
     if problem.problem_type not in ("Graph Coloring", "Hamiltonian Path"):
@@ -222,6 +240,20 @@ def benchmark_process(params: dict, skip_event, event_queue, cancel_event) -> No
             params["sizes"],
             params["solvers"],
             params["repeats"],
+            event_callback=lambda event: _emit(event_queue, event),
+            cancel_token=token,
+            logging_options=params.get("logging_options"),
+            timeout_seconds=params.get("timeout_seconds"),
+        )
+    elif params.get("problem_type") == "Random 3-SAT":
+        run_random_3sat_sweep(
+            params["variable_counts"],
+            params["clause_ratios"],
+            params["solvers"],
+            params["repeats"],
+            seed=params.get("seed"),
+            planted=params.get("planted", True),
+            formula_mode=params.get("formula_mode"),
             event_callback=lambda event: _emit(event_queue, event),
             cancel_token=token,
             logging_options=params.get("logging_options"),

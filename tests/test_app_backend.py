@@ -16,8 +16,9 @@ from problems.graph_coloring import (
 from problems.hamiltonian_path import hamiltonian_var, manual_hamiltonian_path_problem, random_hamiltonian_path_problem
 from problems.independent_set import independent_var, manual_independent_set_problem, random_independent_set_problem
 from problems.n_queens import n_queens_problem, n_queens_var
+from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
-from sat_core.benchmark import graph_coloring_sweep, result_to_row
+from sat_core.benchmark import graph_coloring_sweep, result_to_row, run_random_3sat_sweep
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
 from sat_core.models import BenchmarkRow, ProblemInstance, SolveResult
 from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_ROW, RunEvent, RunToken
@@ -85,6 +86,30 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(len(result.decoded["positions"]), 4)
         self.assertEqual(len(result.decoded["board"]), 4)
 
+    def test_random_3sat_problem_is_buildable_and_reproducible(self):
+        first = random_3sat_problem(6, 12, seed=4, planted=True)
+        second = random_3sat_problem(6, 12, seed=4, planted=True)
+
+        self.assertEqual(first.problem_type, "Random 3-SAT")
+        self.assertEqual(first.clauses, second.clauses)
+        self.assertEqual(first.metadata["variables"], 6)
+        self.assertEqual(first.metadata["clauses_requested"], 12)
+        self.assertEqual(first.metadata["width"], 3)
+        self.assertEqual(first.metadata["mode"], "Planted SAT")
+        self.assertTrue(all(len(clause) == 3 for clause in first.clauses))
+        self.assertTrue(all(len({abs(lit) for lit in clause}) == 3 for clause in first.clauses))
+
+        result = solve_problem(first, "CDCL")
+        self.assertEqual(result.status, "SAT")
+
+    def test_random_3sat_forced_unsat_mode(self):
+        problem = random_3sat_problem(6, 12, seed=4, formula_mode="Forced UNSAT")
+
+        self.assertEqual(problem.metadata["mode"], "Forced UNSAT")
+        self.assertTrue(problem.metadata["forced_unsat"])
+        self.assertTrue(all(len(clause) == 3 for clause in problem.clauses))
+        self.assertEqual(solve_problem(problem, "CDCL").status, "UNSAT")
+
     def test_hamiltonian_path_problem_sat_and_unsat(self):
         sat_problem = manual_hamiltonian_path_problem(3, "1-2, 2-3")
         unsat_problem = manual_hamiltonian_path_problem(3, "1-2")
@@ -130,6 +155,15 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].solver, "WalkSAT")
         self.assertIn(rows[0].status, ("SAT", "UNKNOWN"))
+
+    def test_random_3sat_benchmark_sweep_rows(self):
+        rows = run_random_3sat_sweep([6], [3.0], ["CDCL"], repeats=1, seed=7, formula_mode="Planted SAT")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].problem_type, "Random 3-SAT")
+        self.assertEqual(rows[0].status, "SAT")
+        self.assertEqual(rows[0].problem_metadata["variables"], 6)
+        self.assertEqual(rows[0].problem_metadata["clauses_requested"], 18)
 
     def test_average_benchmark_groups_finished_repeats_only(self):
         app = SATApp.__new__(SATApp)
@@ -545,7 +579,9 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("N-Queens", PROBLEM_KINDS)
             self.assertIn("Hamiltonian Path", PROBLEM_KINDS)
             self.assertIn("Independent Set", PROBLEM_KINDS)
+            self.assertIn("Random 3-SAT", PROBLEM_KINDS)
             self.assertIn("N-Queens", BENCHMARK_PROBLEMS)
+            self.assertIn("Random 3-SAT", BENCHMARK_PROBLEMS)
             self.assertIn("WalkSAT", SOLVERS)
             self.assertIn("WalkSAT", app.solve_solver_guide.guide_text)
             self.assertIn("UNKNOWN", app.solve_solver_guide.guide_text)
@@ -577,6 +613,19 @@ class AppBackendTests(unittest.TestCase):
             self.assertEqual(str(app.graph_field_entries["probability"].cget("state")), "disabled")
             self.assertEqual(str(app.edge_text.cget("state")), "disabled")
 
+            app.problem_kind.set("Random 3-SAT")
+            app._refresh_problem_form()
+            self.assertEqual(app.random_3sat_variables.get(), "50")
+            self.assertEqual(app.random_3sat_mode.get(), "Planted SAT")
+            app.random_3sat_variables.set("6")
+            app.random_3sat_clauses.set("12")
+            app.random_3sat_seed.set("3")
+            app.random_3sat_mode.set("Forced UNSAT")
+            problem = app.build_problem_from_form()
+            self.assertEqual(problem.problem_type, "Random 3-SAT")
+            self.assertEqual(problem.clause_count, 12)
+            self.assertEqual(problem.metadata["mode"], "Forced UNSAT")
+
             app.bench_problem.set("Sudoku")
             app._refresh_benchmark_form()
             self.assertEqual(app._selected_sudoku_benchmark_sizes(), [4, 9])
@@ -605,6 +654,11 @@ class AppBackendTests(unittest.TestCase):
             app._refresh_benchmark_graph_controls()
             self.assertEqual(str(app.bench_graph_field_entries["edge_counts"].cget("state")), "normal")
             self.assertEqual(str(app.bench_graph_field_entries["probabilities"].cget("state")), "disabled")
+            app.bench_problem.set("Random 3-SAT")
+            app._refresh_benchmark_form()
+            self.assertEqual(app.benchmark_description.get(), "Generate random 3-literal clauses as planted SAT, forced UNSAT, or unconstrained random formulas.")
+            self.assertEqual(app.bench_3sat_variables.get(), "20,50,100")
+            self.assertEqual(app.bench_3sat_mode.get(), "Planted SAT")
         finally:
             root.destroy()
 

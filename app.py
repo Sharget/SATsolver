@@ -37,6 +37,7 @@ from problems.independent_set import (
     random_independent_set_problem,
 )
 from problems.n_queens import n_queens_problem
+from problems.random_3sat import RANDOM_3SAT_MODES, random_3sat_problem
 from problems.sudoku import sudoku_problem
 from sat_core.benchmark import SUDOKU_BENCHMARK_SIZES, write_benchmark_csv
 from sat_core.dimacs import clauses_to_dimacs, load_dimacs, save_dimacs
@@ -60,13 +61,14 @@ from sat_core.solver_runner import SOLVERS
 INPUT_GENERATED = Path("input/generated")
 BENCHMARK_OUTPUT = Path("output/benchmarks")
 SUDOKU_SIZES = (4, 9, 16, 25)
-PROBLEM_KINDS = ("Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set", "DIMACS/CNF")
-BENCHMARK_PROBLEMS = ("Graph Coloring", "Sudoku", "N-Queens", "Hamiltonian Path", "Independent Set")
+PROBLEM_KINDS = ("Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "DIMACS/CNF")
+BENCHMARK_PROBLEMS = ("Graph Coloring", "Sudoku", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set")
 GRAPH_PROBLEM_KINDS = ("Graph Coloring", "Hamiltonian Path", "Independent Set")
 PROBLEM_DESCRIPTIONS = {
     "Sudoku": "Fill an n x n grid so each row, column, and square box contains every value exactly once.",
     "Graph Coloring": "Assign one of k colors to each node so adjacent nodes never share the same color.",
     "N-Queens": "Place n queens on an n x n chessboard so no two queens attack each other.",
+    "Random 3-SAT": "Generate random 3-literal clauses as planted SAT, forced UNSAT, or unconstrained random formulas.",
     "Hamiltonian Path": "Find a path through an undirected graph that visits every node exactly once.",
     "Independent Set": "Choose at least k graph nodes so no two chosen nodes are connected by an edge.",
     "DIMACS/CNF": "Paste or load SAT clauses directly in DIMACS CNF format.",
@@ -1275,6 +1277,8 @@ class SATApp:
             self._build_graph_form()
         elif kind == "N-Queens":
             self._build_n_queens_form()
+        elif kind == "Random 3-SAT":
+            self._build_random_3sat_form()
         else:
             self._build_dimacs_form()
 
@@ -1360,6 +1364,30 @@ class SATApp:
         ttk.Label(fields, text="Board size n").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Entry(fields, textvariable=self.n_queens_size, width=12).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
 
+    def _build_random_3sat_form(self) -> None:
+        fields = ttk.Frame(self.problem_form)
+        fields.pack(fill=tk.X)
+        fields.columnconfigure(1, weight=1)
+        self.random_3sat_variables = tk.StringVar(value="50")
+        self.random_3sat_clauses = tk.StringVar(value="210")
+        self.random_3sat_seed = tk.StringVar(value="1")
+        self.random_3sat_mode = tk.StringVar(value="Planted SAT")
+
+        ttk.Label(fields, text="Variables").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(fields, textvariable=self.random_3sat_variables, width=12).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(fields, text="Clauses").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(fields, textvariable=self.random_3sat_clauses, width=12).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(fields, text="Seed").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(fields, textvariable=self.random_3sat_seed, width=12).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(fields, text="Formula mode").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            fields,
+            textvariable=self.random_3sat_mode,
+            values=RANDOM_3SAT_MODES,
+            state="readonly",
+            width=12,
+        ).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+
     def _build_graph_form(self) -> None:
         self.graph_mode = tk.StringVar(value="Manual")
         self.graph_field_entries = {}
@@ -1435,7 +1463,7 @@ class SATApp:
         ttk.Combobox(
             type_row,
             textvariable=self.dimacs_loaded_problem_type,
-            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"),
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"),
             state="readonly",
             width=22,
         ).pack(side=tk.LEFT, padx=(8, 0))
@@ -1464,6 +1492,15 @@ class SATApp:
 
         if kind == "N-Queens":
             return n_queens_problem(int(self.n_queens_size.get()))
+
+        if kind == "Random 3-SAT":
+            seed = self.random_3sat_seed.get().strip()
+            return random_3sat_problem(
+                int(self.random_3sat_variables.get()),
+                int(self.random_3sat_clauses.get()),
+                seed=int(seed) if seed else None,
+                formula_mode=self.random_3sat_mode.get(),
+            )
 
         if kind == "Graph Coloring":
             nodes = int(self.graph_nodes.get())
@@ -1539,6 +1576,16 @@ class SATApp:
 
         if kind == "N-Queens":
             return {"kind": "N-Queens", "size": int(self.n_queens_size.get())}
+
+        if kind == "Random 3-SAT":
+            seed = self.random_3sat_seed.get().strip()
+            return {
+                "kind": "Random 3-SAT",
+                "variables": int(self.random_3sat_variables.get()),
+                "clauses": int(self.random_3sat_clauses.get()),
+                "seed": int(seed) if seed else None,
+                "formula_mode": self.random_3sat_mode.get(),
+            }
 
         if kind in GRAPH_PROBLEM_KINDS:
             mode = self.graph_mode.get()
@@ -1721,6 +1768,13 @@ class SATApp:
             return f"size={metadata.get('size', '?')}, givens={metadata.get('givens', '?')}"
         if problem.problem_type == "N-Queens":
             return f"n={metadata.get('size', '?')}"
+        if problem.problem_type == "Random 3-SAT":
+            return (
+                f"n={metadata.get('variables', '?')}, "
+                f"m={metadata.get('clauses_requested', '?')}, "
+                f"ratio={metadata.get('ratio', 0):.2f}, "
+                f"{metadata.get('mode', 'random')}"
+            )
         if problem.problem_type == "Independent Set":
             return f"k={metadata.get('target', '?')}, edges={metadata.get('edges', '-')}"
         if problem.problem_type in ("Graph Coloring", "Hamiltonian Path"):
@@ -1875,7 +1929,7 @@ class SATApp:
             messagebox.showerror("Cannot load DIMACS", str(exc))
 
     def _infer_dimacs_problem_type(self, text: str) -> str:
-        valid_types = {"DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"}
+        valid_types = {"DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"}
         for raw_line in text.splitlines():
             line = raw_line.strip()
             if not line.startswith("c"):
@@ -1901,7 +1955,7 @@ class SATApp:
         ttk.Combobox(
             dialog,
             textvariable=chosen,
-            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"),
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set"),
             state="readonly",
             width=28,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=12)
@@ -1964,6 +2018,9 @@ class SATApp:
         self.bench_colors = tk.StringVar(value="2,3")
         self.bench_targets = tk.StringVar(value="2,3")
         self.bench_n_queens_sizes = tk.StringVar(value="4,8")
+        self.bench_3sat_variables = tk.StringVar(value="20,50,100")
+        self.bench_3sat_ratios = tk.StringVar(value="3.5,4.2,5.0")
+        self.bench_3sat_mode = tk.StringVar(value="Planted SAT")
         self.bench_repeats = tk.StringVar(value="1")
         self.bench_timeout_seconds = tk.StringVar(value="30")
         self.bench_seed = tk.StringVar(value="1")
@@ -2340,6 +2397,9 @@ class SATApp:
         elif problem == "N-Queens":
             self.benchmark_controls.configure(text="N-Queens Benchmark")
             self._build_n_queens_benchmark_form()
+        elif problem == "Random 3-SAT":
+            self.benchmark_controls.configure(text="Random 3-SAT Benchmark")
+            self._build_random_3sat_benchmark_form()
         else:
             self.benchmark_controls.configure(text=f"{problem} Benchmark")
             self._build_graph_benchmark_form()
@@ -2416,6 +2476,22 @@ class SATApp:
         ttk.Label(self.benchmark_input_frame, text="Sizes").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_n_queens_sizes, width=18).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
 
+    def _build_random_3sat_benchmark_form(self) -> None:
+        ttk.Label(self.benchmark_input_frame, text="Variables").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_3sat_variables, width=18).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Clause/var ratios").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_3sat_ratios, width=18).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Seed").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_seed, width=18).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Formula mode").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            self.benchmark_input_frame,
+            textvariable=self.bench_3sat_mode,
+            values=RANDOM_3SAT_MODES,
+            state="readonly",
+            width=18,
+        ).grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+
     def _build_sudoku_benchmark_form(self) -> None:
         ttk.Label(self.benchmark_input_frame, text="Sizes").grid(row=0, column=0, sticky="nw", pady=2)
         sizes_frame = ttk.Frame(self.benchmark_input_frame)
@@ -2473,6 +2549,22 @@ class SATApp:
                     "sizes": sizes,
                     "solvers": solvers,
                     "repeats": repeats,
+                    "logging_options": logging_options,
+                    "timeout_seconds": timeout_seconds,
+                }
+            elif self.bench_problem.get() == "Random 3-SAT":
+                seed_text = self.bench_seed.get().strip()
+                variable_counts = parse_int_list(self.bench_3sat_variables.get())
+                clause_ratios = parse_float_list(self.bench_3sat_ratios.get())
+                total_runs = len(variable_counts) * len(clause_ratios) * repeats * len(solvers)
+                params = {
+                    "problem_type": "Random 3-SAT",
+                    "variable_counts": variable_counts,
+                    "clause_ratios": clause_ratios,
+                    "solvers": solvers,
+                    "repeats": repeats,
+                    "seed": int(seed_text) if seed_text else None,
+                    "formula_mode": self.bench_3sat_mode.get(),
                     "logging_options": logging_options,
                     "timeout_seconds": timeout_seconds,
                 }
@@ -2743,6 +2835,16 @@ class SATApp:
                 f"Board cells: {metadata.get('board_cells', '-')}",
             ]
 
+        if row.problem_type == "Random 3-SAT":
+            return [
+                f"Variables: {metadata.get('variables', row.variables)}",
+                f"Clauses: {metadata.get('clauses_requested', row.clauses)}",
+                f"Clause width: {metadata.get('width', 3)}",
+                f"Ratio: {metadata.get('ratio', 0):.2f}",
+                f"Generation: {row.generation_mode or metadata.get('mode', '-')}",
+                f"Seed: {row.seed}",
+            ]
+
         if self._is_graph_benchmark_row(row):
             nodes = self._safe_int(row.node_count)
             edges = len(row.graph_edges) if row.graph_edges else self._safe_int(row.edge_count)
@@ -2764,6 +2866,8 @@ class SATApp:
             return "Sudoku puzzle"
         if row.problem_type == "N-Queens":
             return "N-Queens board"
+        if row.problem_type == "Random 3-SAT":
+            return "3-SAT formula"
         if self._is_graph_benchmark_row(row):
             return "Graph edges"
         return "Problem data"
@@ -2773,6 +2877,8 @@ class SATApp:
             return self._format_sudoku_benchmark_data(row)
         if row.problem_type == "N-Queens":
             return self._format_n_queens_benchmark_data(row)
+        if row.problem_type == "Random 3-SAT":
+            return self._format_random_3sat_data(row)
         if self._is_graph_benchmark_row(row):
             return self._format_benchmark_edges(row.graph_edges, row.node_count)
         return "No extra problem data stored for this row."
@@ -2802,6 +2908,23 @@ class SATApp:
         else:
             lines.append("")
             lines.append("No board response stored for this row.")
+        return "\n".join(lines)
+
+    def _format_random_3sat_data(self, row: BenchmarkRow) -> str:
+        metadata = row.problem_metadata or {}
+        lines = [
+            f"Variables: {metadata.get('variables', row.variables)}",
+            f"Clauses: {metadata.get('clauses_requested', row.clauses)}",
+            f"Ratio: {metadata.get('ratio', 0):.2f}",
+            f"Mode: {metadata.get('mode', '-')}",
+            f"Seed: {row.seed}",
+            "",
+            "First clauses:",
+        ]
+        shown = row.problem_clauses[:20]
+        lines.extend(" ".join(str(lit) for lit in clause) for clause in shown)
+        if len(row.problem_clauses) > len(shown):
+            lines.append(f"... {len(row.problem_clauses) - len(shown)} more clauses")
         return "\n".join(lines)
 
     def _format_grid_with_dots(self, grid: list[list[int]]) -> str:

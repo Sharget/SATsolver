@@ -20,6 +20,10 @@ Choose one problem type:
   `G(n,d)` average-degree mode.
 - N-Queens: choose board size `n`. The app asks whether `n` queens can be
   placed on an `n x n` board with no shared row, column, or diagonal.
+- Random 3-SAT: choose variable count, clause count, optional seed, and formula
+  mode. `Planted SAT` guarantees a satisfying assignment, `Forced UNSAT`
+  inserts a small unsatisfiable 3-SAT core, and `Random` leaves satisfiability
+  unconstrained.
 - Hamiltonian Path: choose manual or random undirected graph input. The app
   asks whether some path visits every node exactly once.
 - Independent Set: choose manual or random undirected graph input plus target
@@ -87,7 +91,10 @@ local-search solver are easy to compare. It also runs Sudoku benchmarks over
 built-in deterministic
 `4x4`, `9x9`, `16x16`, and `25x25` cases. Sudoku defaults to `4x4` and `9x9`;
 larger sizes are opt-in because they can take much longer. N-Queens benchmarks
-sweep board sizes. Hamiltonian Path and Independent Set benchmarks reuse the
+sweep board sizes. Random 3-SAT benchmarks sweep variable counts and
+clause-to-variable ratios; use `Planted SAT` for satisfiable WalkSAT targets,
+`Forced UNSAT` for complete-solver UNSAT proofs, or `Random` for natural
+near-threshold mixes. Hamiltonian Path and Independent Set benchmarks reuse the
 same random graph modes as graph coloring; Independent Set also sweeps target
 `k` values. Benchmark solver logs can use the same normal, periodic progress,
 or capped verbose modes as Solve. The benchmark tab also has the same CDCL

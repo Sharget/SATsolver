@@ -21,6 +21,7 @@ from problems.independent_set import (
     random_independent_set_problem,
 )
 from problems.n_queens import n_queens_problem
+from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem
 
 __all__ = [
@@ -41,5 +42,6 @@ __all__ = [
     "random_hamiltonian_path_problem",
     "random_independent_set_problem",
     "random_graph_coloring_problem",
+    "random_3sat_problem",
     "sudoku_problem",
 ]

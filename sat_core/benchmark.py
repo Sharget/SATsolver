@@ -21,6 +21,7 @@ from problems.independent_set import (
     random_independent_set_problem,
 )
 from problems.n_queens import n_queens_problem
+from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.models import BENCHMARK_HEADERS, BenchmarkRow, ProblemInstance, SolveResult
 from sat_core.runtime import (
@@ -191,6 +192,14 @@ def benchmark_detail(problem: ProblemInstance) -> str:
     if problem.problem_type == "N-Queens":
         return f"n={problem.metadata.get('size', '?')}"
 
+    if problem.problem_type == "Random 3-SAT":
+        return (
+            f"n={problem.metadata.get('variables', '?')}, "
+            f"m={problem.metadata.get('clauses_requested', '?')}, "
+            f"ratio={problem.metadata.get('ratio', 0):.2f}, "
+            f"{problem.metadata.get('mode', 'random')}"
+        )
+
     if problem.problem_type == "Independent Set":
         return f"k={problem.metadata.get('target', '?')}, edges={edges}"
 
@@ -345,6 +354,72 @@ def run_n_queens_sweep(
             )
             if not should_continue:
                 return rows
+
+    return rows
+
+
+def run_random_3sat_sweep(
+    variable_counts: Iterable[int],
+    clause_ratios: Iterable[float],
+    solvers: Iterable[str],
+    repeats: int,
+    seed: int | None = None,
+    planted: bool = True,
+    formula_mode: str | None = None,
+    event_callback=None,
+    cancel_token: RunToken | None = None,
+    logging_options: dict | None = None,
+    timeout_seconds: float | None = None,
+) -> list[BenchmarkRow]:
+    variable_counts = list(variable_counts)
+    clause_ratios = list(clause_ratios)
+    solvers = list(solvers)
+    rows = []
+    total_cases = len(variable_counts) * len(clause_ratios) * repeats
+    total_runs = total_cases * len(solvers)
+    case_index = 0
+    run_index = 0
+
+    if cancel_requested(cancel_token):
+        emit(event_callback, EVENT_CANCELLED, "Benchmark cancelled before start.", current=0, total=total_runs)
+        return rows
+
+    for variable_count in variable_counts:
+        for ratio in clause_ratios:
+            clause_count = max(1, round(variable_count * ratio))
+            for repeat in range(1, repeats + 1):
+                if cancel_requested(cancel_token):
+                    emit(event_callback, EVENT_CANCELLED, "Benchmark cancelled.", current=run_index, total=total_runs)
+                    return rows
+
+                case_index += 1
+                ratio_seed = int(ratio * 1000)
+                case_seed = None if seed is None else seed + repeat + variable_count * 1000 + ratio_seed
+                problem = random_3sat_problem(
+                    variable_count,
+                    clause_count,
+                    seed=case_seed,
+                    planted=planted,
+                    formula_mode=formula_mode,
+                )
+                emit(event_callback, EVENT_LOG, f"[{case_index}/{total_cases}] {problem.name} repeat {repeat}")
+                emit(event_callback, EVENT_LOG, "   -> Generating CNF...")
+                emit(event_callback, EVENT_LOG, _random_3sat_generation_summary(problem))
+
+                run_index, should_continue = _run_case_solvers(
+                    problem,
+                    solvers,
+                    repeat,
+                    rows,
+                    run_index,
+                    total_runs,
+                    event_callback,
+                    cancel_token,
+                    logging_options,
+                    timeout_seconds,
+                )
+                if not should_continue:
+                    return rows
 
     return rows
 
@@ -624,6 +699,15 @@ def _sudoku_generation_summary(problem: ProblemInstance) -> str:
 
 def _generic_generation_summary(problem: ProblemInstance) -> str:
     return f"      Clauses: {problem.clause_count}, Variables: {problem.variable_count}"
+
+
+def _random_3sat_generation_summary(problem: ProblemInstance) -> str:
+    return (
+        f"      Variables: {problem.metadata.get('variables')}, "
+        f"Clauses: {problem.metadata.get('clauses_requested')}, "
+        f"Ratio: {problem.metadata.get('ratio', 0):.2f}, "
+        f"Mode: {problem.metadata.get('mode')}"
+    )
 
 
 def write_benchmark_csv(path: str | Path, rows: list[BenchmarkRow]) -> None:
