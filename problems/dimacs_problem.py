@@ -6,7 +6,11 @@ from sat_core.dimacs import load_dimacs, parse_dimacs_text
 from sat_core.models import ProblemInstance
 
 
-def dimacs_problem_from_text(text: str, name: str = "DIMACS input") -> ProblemInstance:
+def dimacs_problem_from_text(
+    text: str,
+    name: str = "DIMACS input",
+    problem_type: str = "DIMACS",
+) -> ProblemInstance:
     clauses = parse_dimacs_text(text)
 
     if not clauses:
@@ -14,9 +18,9 @@ def dimacs_problem_from_text(text: str, name: str = "DIMACS input") -> ProblemIn
 
     return ProblemInstance(
         name=name,
-        problem_type="DIMACS",
+        problem_type=problem_type,
         clauses=clauses,
-        metadata={"source": "text"},
+        metadata={"source": "text", "loaded_as": problem_type},
     )
 
 

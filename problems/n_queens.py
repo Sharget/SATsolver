@@ -54,6 +54,6 @@ def n_queens_problem(size: int, name: str | None = None) -> ProblemInstance:
         name=name or f"N-Queens n{size}",
         problem_type="N-Queens",
         clauses=clauses,
-        metadata={"size": size},
+        metadata={"size": size, "queens": size, "board_cells": size * size},
         decoder=lambda solution: decode_n_queens(solution, size),
     )

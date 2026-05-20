@@ -57,6 +57,13 @@ def result_to_row(problem: ProblemInstance, result: SolveResult, repeat: int) ->
         learned_clauses=stats.get("learned_clauses", "-"),
         generation_mode=problem.metadata.get("mode", ""),
         edge_count=problem.metadata.get("edges", "-"),
+        node_count=problem.metadata.get("nodes", "-"),
+        graph_edges=problem.metadata.get("graph_edges", []),
+        decoded=result.decoded,
+        seed=problem.metadata.get("seed", "-"),
+        solver_options=stats.get("solver_options", ""),
+        problem_metadata=dict(problem.metadata),
+        problem_clauses=[clause[:] for clause in problem.clauses],
     )
 
 

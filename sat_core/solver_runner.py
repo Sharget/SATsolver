@@ -71,6 +71,8 @@ def solve_clauses(
     else:
         raise ValueError(f"Unknown solver: {solver_name}")
 
+    stats.setdefault("solver_options", _solver_options_summary(solver_name, logging_options))
+
     if status == "CANCELLED":
         emit(event_callback, EVENT_LOG, f"{solver_name} cancelled after {elapsed:.4f}s.")
     elif status == "TIMEOUT":
@@ -126,6 +128,19 @@ def _stats_summary(stats: dict) -> str:
         ("conflicts", "conflicts"),
         ("propagations", "propagations"),
         ("learned_clauses", "learned"),
+        ("restarts", "restarts"),
     ]
     parts = [f"{label}={stats[key]}" for key, label in labels if key in stats]
     return ", ".join(parts)
+
+
+def _solver_options_summary(solver_name: str, options: dict) -> str:
+    if solver_name == "CDCL":
+        return (
+            f"branch={options.get('branching', 'VSIDS')}; "
+            f"phase={options.get('initial_phase', 'Positive first')}; "
+            f"restart={options.get('restart_interval') or '-'}; "
+            f"learned_limit={options.get('learned_clause_limit') or '-'}; "
+            f"seed={options.get('random_seed') or '-'}"
+        )
+    return "DPLL small-clause"

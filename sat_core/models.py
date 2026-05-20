@@ -66,6 +66,13 @@ class BenchmarkRow:
     learned_clauses: int | str = "-"
     generation_mode: str = ""
     edge_count: int | str = "-"
+    node_count: int | str = "-"
+    graph_edges: list[tuple[int, int]] = field(default_factory=list)
+    decoded: Any = None
+    seed: int | str | None = "-"
+    solver_options: str = ""
+    problem_metadata: dict[str, Any] = field(default_factory=dict)
+    problem_clauses: list[list[int]] = field(default_factory=list)
 
     def as_csv_row(self) -> list[Any]:
         return [
@@ -84,6 +91,7 @@ class BenchmarkRow:
             self.learned_clauses,
             self.generation_mode,
             self.edge_count,
+            self.solver_options,
         ]
 
 
@@ -103,4 +111,5 @@ BENCHMARK_HEADERS = [
     "learned_clauses",
     "generation_mode",
     "edge_count",
+    "solver_options",
 ]

@@ -8,6 +8,7 @@ from utils.colored_graph import (
     generate_coloring_clauses,
     generate_random_graph,
     generate_random_graph_exact_edges,
+    graph_edges,
 )
 
 
@@ -71,7 +72,7 @@ def graph_coloring_problem(graph: Graph, colors: int, name: str | None = None) -
         name=name or f"Graph Coloring n{nodes}_e{edges}_k{colors}",
         problem_type="Graph Coloring",
         clauses=clauses,
-        metadata={"nodes": nodes, "edges": edges, "colors": colors},
+        metadata={"nodes": nodes, "edges": edges, "graph_edges": graph_edges(graph), "colors": colors},
         decoder=lambda solution: decode_coloring(solution, colors),
     )
 

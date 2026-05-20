@@ -95,6 +95,57 @@ ones. The next decision chooses the unassigned variable with the highest score.
 
 This is a small version of the VSIDS idea used by modern SAT solvers.
 
+## Configurable Heuristics
+
+The app exposes CDCL heuristics so benchmark runs can compare search behavior,
+not only problem encodings.
+
+Branching chooses the next unassigned variable:
+
+- `VSIDS`: the default activity-based choice. Variables involved in recent
+  conflicts become more attractive.
+- `Most frequent`: choose the variable that appears most often in the original
+  formula.
+- `MOMS`: look at the shortest currently unresolved clauses and choose the
+  most common variable there.
+- `DLIS`: choose the most common unresolved literal, which also chooses the
+  branch phase.
+- `Random`: choose an unassigned variable using the optional random seed.
+
+Initial phase chooses the first truth value for a decision:
+
+- `Positive first`: the default. This works well for the app encoders because
+  positive literals usually mean constructive choices such as placing a queen,
+  selecting a node, or assigning a color.
+- `Negative first`: useful as a contrast.
+- `Polarity based`: uses the original literal polarity balance. This was the
+  old behavior and can help on some arbitrary DIMACS files, but it is often bad
+  for encodings with many negative at-most-one clauses.
+- `Random`: uses the optional random seed for reproducible experiments.
+
+Restarts can be enabled with a conflict interval. A restart backtracks to
+decision level `0` while keeping learned clauses, activity scores, and saved
+phases. This can help CDCL escape unlucky branches.
+
+Learned clause deletion can be enabled with a learned-clause limit. Original
+clauses are never removed. The solver prefers deleting longer and older learned
+clauses, while keeping clauses that are currently used as propagation reasons.
+This keeps the watched-literal state smaller on long runs.
+
+The random seed affects random branching and random phase choices. Reusing the
+same seed should make those heuristic choices reproducible.
+
+## DPLL Baseline
+
+DPLL remains intentionally simpler. It recursively chooses a variable, tries a
+value, simplifies the formula, and uses unit propagation after each assignment.
+In this app it uses a small-clause variable heuristic.
+
+CDCL is usually stronger on larger or harder formulas because it learns from
+conflicts and can backjump. DPLL can still win on some small or highly
+structured formulas because it has less overhead: no learned clause database,
+no conflict analysis, and no watch rebuilding.
+
 ## How To Run
 
 Solve a DIMACS file directly from Python:

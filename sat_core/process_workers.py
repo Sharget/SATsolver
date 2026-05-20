@@ -97,7 +97,10 @@ def problem_from_snapshot(snapshot: dict) -> ProblemInstance:
             return average_degree_independent_set_problem(snapshot["nodes"], snapshot["average_degree"], snapshot["target"], seed=snapshot["seed"])
         return manual_independent_set_problem(snapshot["nodes"], snapshot["target"], snapshot["edge_text"])
 
-    return dimacs_problem_from_text(snapshot["text"])
+    return dimacs_problem_from_text(
+        snapshot["text"],
+        problem_type=snapshot.get("loaded_problem_type", "DIMACS"),
+    )
 
 
 def _emit(queue, event: RunEvent) -> None:

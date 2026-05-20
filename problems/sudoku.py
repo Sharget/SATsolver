@@ -53,6 +53,12 @@ def sudoku_problem(grid: list[list[int]], name: str | None = None) -> ProblemIns
         name=name or f"Sudoku {size}x{size}",
         problem_type="Sudoku",
         clauses=clauses,
-        metadata={"size": size, "givens": sum(1 for row in grid for value in row if value != 0)},
+        metadata={
+            "size": size,
+            "box_size": int(math.sqrt(size)),
+            "givens": sum(1 for row in grid for value in row if value != 0),
+            "empty_cells": sum(1 for row in grid for value in row if value == 0),
+            "grid": [row[:] for row in grid],
+        },
         decoder=lambda solution: decode_sudoku(solution, size),
     )

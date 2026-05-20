@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+import random
 import time
 
 from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requested
@@ -11,6 +12,7 @@ class Clause:
     learnt: bool = False
     watch1: int = 0
     watch2: int = 0
+    created: int = 0
 
 
 def _normalise_formula(clauses):
@@ -87,6 +89,8 @@ def cdcl(
         "propagations": 0,
         "conflicts": 0,
         "learned_clauses": 0,
+        "active_learned_clauses": 0,
+        "restarts": 0,
         "elapsed": 0.0,
     }
     logging_options = logging_options or {}
@@ -94,16 +98,53 @@ def cdcl(
     if log_mode not in ("normal", "periodic", "debug"):
         log_mode = "normal"
 
+    def normalise_choice(value, allowed, default):
+        if value is None:
+            return default
+        canonical = str(value).strip().lower().replace("_", " ").replace("-", " ")
+        for option in allowed:
+            if canonical == option.lower():
+                return option
+        return default
+
     def positive_int(value, default):
         try:
             return max(1, int(value))
         except (TypeError, ValueError):
             return default
 
+    def optional_positive_int(value):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     progress_interval = positive_int(logging_options.get("progress_interval"), 100)
     verbose_limit = positive_int(logging_options.get("verbose_limit"), 120)
+    branching_mode = normalise_choice(
+        logging_options.get("branching"),
+        ("VSIDS", "Most frequent", "MOMS", "DLIS", "Random"),
+        "VSIDS",
+    )
+    initial_phase_mode = normalise_choice(
+        logging_options.get("initial_phase"),
+        ("Positive first", "Negative first", "Polarity based", "Random"),
+        "Positive first",
+    )
+    restart_interval = optional_positive_int(logging_options.get("restart_interval"))
+    learned_clause_limit = optional_positive_int(logging_options.get("learned_clause_limit"))
+    random_seed = logging_options.get("random_seed")
+    rng = random.Random(random_seed) if random_seed not in (None, "") else random.Random()
     verbose_emitted = 0
     last_progress_work = 0
+    learned_sequence = 0
+    conflicts_at_last_restart = 0
+    stats["solver_options"] = (
+        f"branch={branching_mode}; phase={initial_phase_mode}; "
+        f"restart={restart_interval or '-'}; learned_limit={learned_clause_limit or '-'}; "
+        f"seed={random_seed if random_seed not in (None, '') else '-'}"
+    )
 
     def log_debug(message):
         nonlocal verbose_emitted
@@ -130,7 +171,8 @@ def cdcl(
                 f"decisions={stats['decisions']}, "
                 f"conflicts={stats['conflicts']}, "
                 f"propagations={stats['propagations']}, "
-                f"learned={stats['learned_clauses']}"
+                f"learned={stats['learned_clauses']} "
+                f"active learned={stats['active_learned_clauses']}"
             ),
         )
 
@@ -175,14 +217,26 @@ def cdcl(
     var_decay = 0.95
 
     polarity_score = [0] * (max_var + 1)
+    occurrence_count = [0] * (max_var + 1)
     for clause in normalised:
         for lit in clause:
             var = abs(lit)
             activity[var] += 1.0
+            occurrence_count[var] += 1
             polarity_score[var] += 1 if lit > 0 else -1
 
     for var in variables:
-        preferred_phase[var] = polarity_score[var] >= 0
+        if initial_phase_mode == "Negative first":
+            preferred_phase[var] = False
+        elif initial_phase_mode == "Polarity based":
+            preferred_phase[var] = polarity_score[var] >= 0
+        elif initial_phase_mode == "Random":
+            preferred_phase[var] = bool(rng.getrandbits(1))
+        else:
+            # The app's encoders use positive literals as constructive choices
+            # (place a queen, choose a color, select a node). Counting literal
+            # polarity heavily favours False on pairwise "at most one" clauses.
+            preferred_phase[var] = True
 
     def current_level():
         return len(trail_lim)
@@ -218,16 +272,7 @@ def cdcl(
 
         return True
 
-    def attach_clause(clause):
-        """
-        Watch two literals in the clause.
-
-        During propagation we only revisit clauses watching the literal that
-        just became false. That avoids scanning every clause after every
-        assignment, which is the main practical speedup over simple DPLL.
-        """
-        clauses_db.append(clause)
-
+    def watch_clause(clause):
         if len(clause.lits) == 1:
             clause.watch1 = 0
             clause.watch2 = 0
@@ -239,8 +284,33 @@ def cdcl(
         watches[clause.lits[clause.watch1]].append(clause)
         watches[clause.lits[clause.watch2]].append(clause)
 
+    def rebuild_watches():
+        watches.clear()
+        for clause in clauses_db:
+            watch_clause(clause)
+
+    def update_active_learned_count():
+        stats["active_learned_clauses"] = sum(
+            1 for clause in clauses_db
+            if clause.learnt
+        )
+
+    def attach_clause(clause):
+        """
+        Watch two literals in the clause.
+
+        During propagation we only revisit clauses watching the literal that
+        just became false. That avoids scanning every clause after every
+        assignment, which is the main practical speedup over simple DPLL.
+        """
+        clauses_db.append(clause)
+        watch_clause(clause)
+
     def add_clause(lits, learnt=False):
-        clause = Clause(list(lits), learnt=learnt)
+        nonlocal learned_sequence
+        if learnt:
+            learned_sequence += 1
+        clause = Clause(list(lits), learnt=learnt, created=learned_sequence if learnt else 0)
         attach_clause(clause)
         return clause
 
@@ -433,6 +503,63 @@ def cdcl(
 
         qhead = min(qhead, len(trail))
 
+    def active_reason_clauses():
+        locked = set()
+        for var in variables:
+            reason = reasons[var]
+            if reason is not None:
+                locked.add(reason)
+        return locked
+
+    def prune_learned_clauses():
+        if learned_clause_limit is None:
+            return
+
+        learned = [clause for clause in clauses_db if clause.learnt]
+        if len(learned) <= learned_clause_limit:
+            return
+
+        locked = active_reason_clauses()
+        unlocked = [clause for clause in learned if clause not in locked]
+        remove_count = len(learned) - learned_clause_limit
+        if remove_count <= 0 or not unlocked:
+            return
+
+        # Prefer removing long, old clauses. Locked reason clauses stay alive.
+        removable = sorted(unlocked, key=lambda clause: (-len(clause.lits), clause.created))
+        remove_set = set(removable[:remove_count])
+        
+        clauses_db[:] = [clause for clause in clauses_db if clause not in remove_set]
+
+        # rebuild_watches()
+
+        # Important: do not rebuild all watches during an active search.
+        # Only remove deleted clauses from existing watch lists.
+        for lit in list(watches.keys()):
+            watches[lit] = [
+                clause for clause in watches[lit]
+                if clause not in remove_set
+            ]
+
+            if not watches[lit]:
+                del watches[lit]
+
+        stats["active_learned_clauses"] = len([clause for clause in clauses_db if clause.learnt])
+
+    def unresolved_clause_lits():
+        for clause in clauses_db:
+            unresolved = []
+            satisfied = False
+            for lit in clause.lits:
+                value = lit_value(lit)
+                if value is True:
+                    satisfied = True
+                    break
+                if value is None:
+                    unresolved.append(lit)
+            if not satisfied and unresolved:
+                yield unresolved
+
     def pick_branch_var():
         best_var = None
         best_score = -1.0
@@ -443,6 +570,70 @@ def cdcl(
                 best_score = activity[var]
 
         return best_var
+
+    def pick_most_frequent_var():
+        best_var = None
+        best_score = -1
+        for var in variables:
+            if assignment[var] is None and occurrence_count[var] > best_score:
+                best_var = var
+                best_score = occurrence_count[var]
+        return best_var
+
+    def pick_moms_var():
+        shortest = None
+        scores = defaultdict(int)
+        for unresolved in unresolved_clause_lits():
+            length = len(unresolved)
+            if shortest is None or length < shortest:
+                shortest = length
+                scores.clear()
+            if length == shortest:
+                for lit in unresolved:
+                    var = abs(lit)
+                    if assignment[var] is None:
+                        scores[var] += 1
+
+        if not scores:
+            return None
+        return max(scores, key=lambda var: (scores[var], occurrence_count[var], -var))
+
+    def pick_dlis_decision():
+        literal_scores = defaultdict(int)
+        for unresolved in unresolved_clause_lits():
+            for lit in unresolved:
+                if assignment[abs(lit)] is None:
+                    literal_scores[lit] += 1
+
+        if not literal_scores:
+            return None, None
+
+        best_lit = max(literal_scores, key=lambda lit: (literal_scores[lit], occurrence_count[abs(lit)], abs(lit)))
+        return abs(best_lit), best_lit > 0
+
+    def pick_random_var():
+        candidates = [var for var in variables if assignment[var] is None]
+        return rng.choice(candidates) if candidates else None
+
+    def pick_branch_decision():
+        if branching_mode == "Most frequent":
+            return pick_most_frequent_var(), None
+        if branching_mode == "MOMS":
+            return pick_moms_var(), None
+        if branching_mode == "DLIS":
+            return pick_dlis_decision()
+        if branching_mode == "Random":
+            return pick_random_var(), None
+        return pick_branch_var(), None
+
+    def choose_phase(var, branch_phase=None):
+        if branch_phase is not None:
+            return branch_phase
+        if initial_phase_mode == "Random":
+            return bool(rng.getrandbits(1))
+        if saved_phase[var] is not None:
+            return saved_phase[var]
+        return preferred_phase[var]
 
     while True:
         if stop_requested(cancel_token):
@@ -474,6 +665,7 @@ def cdcl(
             learnt_lits = _dedupe_clause(learnt_lits)
             learnt_clause = add_clause(learnt_lits, learnt=True)
             stats["learned_clauses"] += 1
+            update_active_learned_count()
 
             backtrack(backjump_level)
 
@@ -484,9 +676,22 @@ def cdcl(
                     return finish(None, "UNSAT")
                 continue
 
+            prune_learned_clauses()
+            update_active_learned_count()
+
+            if (
+                restart_interval is not None
+                and stats["conflicts"] - conflicts_at_last_restart >= restart_interval
+                and current_level() > 0
+            ):
+                conflicts_at_last_restart = stats["conflicts"]
+                stats["restarts"] += 1
+                log_debug(f"restart {stats['restarts']} after {stats['conflicts']} conflicts")
+                backtrack(0)
+
             continue
 
-        decision_var = pick_branch_var()
+        decision_var, branch_phase = pick_branch_decision()
 
         if decision_var is None:
             solution = {var: assignment[var] for var in variables if assignment[var] is not None}
@@ -495,10 +700,7 @@ def cdcl(
         trail_lim.append(len(trail))
         stats["decisions"] += 1
 
-        if saved_phase[decision_var] is None:
-            value = preferred_phase[decision_var]
-        else:
-            value = saved_phase[decision_var]
+        value = choose_phase(decision_var, branch_phase)
 
         log_debug(f"decision {stats['decisions']} at level {current_level()}: {decision_var}={value}")
         log_progress()

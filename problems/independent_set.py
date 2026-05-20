@@ -4,7 +4,7 @@ import random
 
 from problems.graph_coloring import edge_count, edge_count_from_average_degree, normalize_graph, parse_edge_list
 from sat_core.models import ProblemInstance
-from utils.colored_graph import generate_random_graph, generate_random_graph_exact_edges
+from utils.colored_graph import generate_random_graph, generate_random_graph_exact_edges, graph_edges
 
 
 Graph = dict[int, list[int]]
@@ -68,7 +68,7 @@ def independent_set_problem(graph: Graph, target_size: int, name: str | None = N
         name=name or f"Independent Set n{node_count}_e{edges}_k{target_size}",
         problem_type="Independent Set",
         clauses=clauses,
-        metadata={"nodes": node_count, "edges": edges, "target": target_size},
+        metadata={"nodes": node_count, "edges": edges, "graph_edges": graph_edges(graph), "target": target_size},
         decoder=lambda solution: decode_independent_set(solution, node_count, target_size),
     )
 

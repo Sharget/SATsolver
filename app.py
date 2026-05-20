@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import multiprocessing as mp
+import math
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -100,9 +101,14 @@ class SATApp:
         BENCHMARK_OUTPUT.mkdir(parents=True, exist_ok=True)
 
         self.current_problem: ProblemInstance | None = None
+        self.latest_solve_result = None
         self.benchmark_rows: list[BenchmarkRow] = []
+        self.benchmark_row_by_item = {}
         self.benchmark_canvas = None
         self.benchmark_figure = None
+        self.benchmark_detail_canvas = None
+        self.solve_detail_canvas = None
+        self.selected_benchmark_row: BenchmarkRow | None = None
         self.event_queue: queue.Queue[RunEvent] = queue.Queue()
         self.active_token: RunToken | None = None
         self.active_thread: threading.Thread | None = None
@@ -323,7 +329,9 @@ class SATApp:
         if event.type == EVENT_RESULT:
             result = event.payload.get("result")
             if result is not None:
+                self.latest_solve_result = result
                 self._write_result(self._format_solve_result(result))
+                self._refresh_solve_detail_panel()
                 self.progress_value.set(100)
             return
 
@@ -375,13 +383,16 @@ class SATApp:
             clauses=problem_data["clauses"],
             metadata=problem_data.get("metadata", {}),
         )
+        self.latest_solve_result = None
         self.cnf_text.delete("1.0", tk.END)
         self.cnf_text.insert("1.0", payload["dimacs"])
         self._write_result(f"Generated {self.current_problem.clause_count} clauses for {self.current_problem.name}.")
+        self._refresh_solve_detail_panel()
 
     def _build_solve_tab(self) -> None:
         self.solve_tab.columnconfigure(0, weight=0)
         self.solve_tab.columnconfigure(1, weight=1)
+        self.solve_tab.columnconfigure(2, weight=0, minsize=420)
         self.solve_tab.rowconfigure(0, weight=1)
 
         left = ttk.Frame(self.solve_tab)
@@ -434,6 +445,12 @@ class SATApp:
 
         self.advanced_solver_logs = tk.BooleanVar(value=False)
         self.solver_log_level = tk.StringVar(value="Periodic progress")
+        self.cdcl_branching = tk.StringVar(value="VSIDS")
+        self.cdcl_initial_phase = tk.StringVar(value="Positive first")
+        self.cdcl_restarts = tk.BooleanVar(value=False)
+        self.cdcl_restart_interval = tk.StringVar(value="100")
+        self.cdcl_learned_clause_limit = tk.StringVar(value="")
+        self.cdcl_random_seed = tk.StringVar(value="")
         ttk.Checkbutton(
             controls,
             text="Advanced solver logs",
@@ -450,6 +467,17 @@ class SATApp:
             width=24,
         )
         self.solver_log_box.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self._build_cdcl_option_controls(
+            controls,
+            6,
+            self.cdcl_branching,
+            self.cdcl_initial_phase,
+            self.cdcl_restarts,
+            self.cdcl_restart_interval,
+            self.cdcl_learned_clause_limit,
+            self.cdcl_random_seed,
+            width=24,
+        )
 
         self.problem_form = ttk.LabelFrame(left, text="Input", padding=8)
         self.problem_form.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
@@ -484,12 +512,109 @@ class SATApp:
         result_scroll.grid(row=3, column=1, sticky="ns", pady=(4, 0))
         self.result_text.configure(yscrollcommand=result_scroll.set)
 
+        self._build_solve_detail_panel()
+
         self._refresh_problem_form()
         self._refresh_solver_log_controls()
+
+    def _build_solve_detail_panel(self) -> None:
+        self.solve_detail_frame = ttk.LabelFrame(self.solve_tab, text="Problem Info", padding=8)
+        self.solve_detail_frame.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+        self.solve_detail_frame.columnconfigure(0, weight=1)
+        self.solve_detail_frame.rowconfigure(0, weight=1)
+        self.solve_detail_frame.rowconfigure(1, weight=2)
+
+        summary_frame = ttk.Frame(self.solve_detail_frame)
+        summary_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        summary_frame.rowconfigure(1, weight=1)
+        summary_frame.columnconfigure(0, weight=1)
+        ttk.Label(summary_frame, text="Stats and response").grid(row=0, column=0, sticky="w")
+        self.solve_detail_text = tk.Text(summary_frame, height=8, width=42, wrap=tk.WORD)
+        self.solve_detail_text.grid(row=1, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(summary_frame, orient=tk.VERTICAL, command=self.solve_detail_text.yview)
+        detail_scroll.grid(row=1, column=1, sticky="ns")
+        self.solve_detail_text.configure(yscrollcommand=detail_scroll.set)
+        ttk.Button(summary_frame, text="Copy response", command=self.copy_solve_response).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        self.solve_detail_notebook = ttk.Notebook(self.solve_detail_frame)
+        self.solve_detail_notebook.grid(row=1, column=0, sticky="nsew")
+
+        input_frame = ttk.Frame(self.solve_detail_notebook, padding=6)
+        input_frame.rowconfigure(1, weight=1)
+        input_frame.columnconfigure(0, weight=1)
+        self.solve_detail_notebook.add(input_frame, text="Input")
+        self.solve_input_label = tk.StringVar(value="Problem data")
+        ttk.Label(input_frame, textvariable=self.solve_input_label).grid(row=0, column=0, sticky="w")
+        self.solve_input_text = tk.Text(input_frame, height=14, width=42, wrap=tk.WORD)
+        self.solve_input_text.grid(row=1, column=0, sticky="nsew")
+        input_scroll = ttk.Scrollbar(input_frame, orient=tk.VERTICAL, command=self.solve_input_text.yview)
+        input_scroll.grid(row=1, column=1, sticky="ns")
+        self.solve_input_text.configure(yscrollcommand=input_scroll.set)
+        ttk.Button(input_frame, text="Copy data", command=self.copy_solve_data).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        visual_frame = ttk.Frame(self.solve_detail_notebook, padding=6)
+        visual_frame.rowconfigure(2, weight=1)
+        visual_frame.columnconfigure(0, weight=1)
+        self.solve_detail_notebook.add(visual_frame, text="Graph")
+        self.solve_visual_status = tk.StringVar(value="Generate or solve a graph problem to preview it.")
+        ttk.Label(visual_frame, textvariable=self.solve_visual_status, wraplength=360).grid(row=0, column=0, sticky="ew")
+        self.refresh_solve_graph_button = ttk.Button(
+            visual_frame,
+            text="Refresh graph",
+            command=lambda: self.render_solve_graph(force=True),
+            state=tk.DISABLED,
+        )
+        self.refresh_solve_graph_button.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        self.solve_visual_frame = ttk.Frame(visual_frame)
+        self.solve_visual_frame.grid(row=2, column=0, sticky="nsew")
+        self.solve_visual_frame.rowconfigure(0, weight=1)
+        self.solve_visual_frame.columnconfigure(0, weight=1)
+
+        self._write_text_widget(self.solve_detail_text, "Generate or solve a problem to see stats and response.")
+        self._write_text_widget(self.solve_input_text, "Generate or solve a problem to see problem-specific input data.")
 
     def _clear_form(self) -> None:
         for child in self.problem_form.winfo_children():
             child.destroy()
+
+    def _build_cdcl_option_controls(
+        self,
+        parent,
+        start_row: int,
+        branching_var,
+        phase_var,
+        restarts_var,
+        restart_interval_var,
+        learned_limit_var,
+        random_seed_var,
+        width: int,
+    ) -> None:
+        ttk.Label(parent, text="CDCL branching").grid(row=start_row, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            parent,
+            textvariable=branching_var,
+            values=("VSIDS", "Most frequent", "MOMS", "DLIS", "Random"),
+            state="readonly",
+            width=width,
+        ).grid(row=start_row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Initial phase").grid(row=start_row + 1, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            parent,
+            textvariable=phase_var,
+            values=("Positive first", "Negative first", "Polarity based", "Random"),
+            state="readonly",
+            width=width,
+        ).grid(row=start_row + 1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Checkbutton(parent, text="Restarts", variable=restarts_var).grid(row=start_row + 2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=restart_interval_var, width=width).grid(row=start_row + 2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Learned limit").grid(row=start_row + 3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=learned_limit_var, width=width).grid(row=start_row + 3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(parent, text="Random seed").grid(row=start_row + 4, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
     def _refresh_solver_log_controls(self) -> None:
         if self.advanced_solver_logs.get():
@@ -617,6 +742,17 @@ class SATApp:
             self.edge_text.configure(state=tk.NORMAL if manual else tk.DISABLED)
 
     def _build_dimacs_form(self) -> None:
+        self.dimacs_loaded_problem_type = tk.StringVar(value="DIMACS")
+        type_row = ttk.Frame(self.problem_form)
+        type_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(type_row, text="Treat as").pack(side=tk.LEFT)
+        ttk.Combobox(
+            type_row,
+            textvariable=self.dimacs_loaded_problem_type,
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"),
+            state="readonly",
+            width=22,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(self.problem_form, text="Paste DIMACS or plain CNF clauses").pack(anchor="w")
         self.dimacs_input = tk.Text(self.problem_form, height=18, width=36)
         self.dimacs_input.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
@@ -740,22 +876,67 @@ class SATApp:
                 snapshot["edge_text"] = self.edge_text.get("1.0", tk.END)
             return snapshot
 
-        return {"kind": "DIMACS/CNF", "text": self.dimacs_input.get("1.0", tk.END)}
+        return {
+            "kind": "DIMACS/CNF",
+            "text": self.dimacs_input.get("1.0", tk.END),
+            "loaded_problem_type": self.dimacs_loaded_problem_type.get(),
+        }
 
     def _solver_logging_options_from_form(self) -> dict:
-        return self._logging_options(self.advanced_solver_logs.get(), self.solver_log_level.get())
+        return self._logging_options(
+            self.advanced_solver_logs.get(),
+            self.solver_log_level.get(),
+            self.cdcl_branching.get(),
+            self.cdcl_initial_phase.get(),
+            self.cdcl_restarts.get(),
+            self.cdcl_restart_interval.get(),
+            self.cdcl_learned_clause_limit.get(),
+            self.cdcl_random_seed.get(),
+        )
 
     def _benchmark_logging_options_from_form(self) -> dict:
-        return self._logging_options(self.bench_advanced_solver_logs.get(), self.bench_solver_log_level.get())
+        return self._logging_options(
+            self.bench_advanced_solver_logs.get(),
+            self.bench_solver_log_level.get(),
+            self.bench_cdcl_branching.get(),
+            self.bench_cdcl_initial_phase.get(),
+            self.bench_cdcl_restarts.get(),
+            self.bench_cdcl_restart_interval.get(),
+            self.bench_cdcl_learned_clause_limit.get(),
+            self.bench_cdcl_random_seed.get(),
+        )
 
-    def _logging_options(self, enabled: bool, level: str) -> dict:
+    def _logging_options(
+        self,
+        enabled: bool,
+        level: str,
+        branching: str = "VSIDS",
+        initial_phase: str = "Positive first",
+        restarts_enabled: bool = False,
+        restart_interval: str = "100",
+        learned_clause_limit: str = "",
+        random_seed: str = "",
+    ) -> dict:
         if not enabled:
-            return {"mode": "normal"}
+            options = {"mode": "normal"}
+        elif level == "Verbose debug":
+            options = {"mode": "debug", "progress_interval": 50, "verbose_limit": 200}
+        else:
+            options = {"mode": "periodic", "progress_interval": 50, "verbose_limit": 200}
 
-        if level == "Verbose debug":
-            return {"mode": "debug", "progress_interval": 50, "verbose_limit": 200}
+        options["branching"] = branching
+        options["initial_phase"] = initial_phase
+        options["restart_interval"] = self._optional_int_text(restart_interval) if restarts_enabled else None
+        options["learned_clause_limit"] = self._optional_int_text(learned_clause_limit)
+        options["random_seed"] = self._optional_int_text(random_seed)
+        return options
 
-        return {"mode": "periodic", "progress_interval": 50, "verbose_limit": 200}
+    def _optional_int_text(self, text: str) -> int | None:
+        raw = str(text).strip()
+        if not raw:
+            return None
+        value = int(raw)
+        return value if value > 0 else None
 
     def generate_cnf(self) -> None:
         try:
@@ -780,6 +961,103 @@ class SATApp:
             )
         except Exception as exc:
             messagebox.showerror("Cannot solve problem", str(exc))
+
+    def _solve_detail_row(self) -> BenchmarkRow | None:
+        if self.current_problem is None:
+            return None
+
+        result = self.latest_solve_result
+        stats = result.stats if result is not None else {}
+        metadata = self.current_problem.metadata or {}
+        return BenchmarkRow(
+            case_name=self.current_problem.name,
+            problem_type=self.current_problem.problem_type,
+            solver=result.solver if result is not None else self.solver_name.get(),
+            status=result.status if result is not None else "CNF generated",
+            elapsed=result.elapsed if result is not None else 0.0,
+            clauses=self.current_problem.clause_count,
+            variables=self.current_problem.variable_count,
+            repeat=1,
+            detail=self._problem_detail_text(self.current_problem),
+            conflicts=stats.get("conflicts", "-"),
+            decisions=stats.get("decisions", "-"),
+            propagations=stats.get("propagations", "-"),
+            learned_clauses=stats.get("learned_clauses", "-"),
+            generation_mode=metadata.get("mode", ""),
+            edge_count=metadata.get("edges", "-"),
+            node_count=metadata.get("nodes", "-"),
+            graph_edges=metadata.get("graph_edges", []),
+            decoded=result.decoded if result is not None else None,
+            seed=metadata.get("seed", "-"),
+            solver_options=stats.get("solver_options", ""),
+            problem_metadata=dict(metadata),
+            problem_clauses=[clause[:] for clause in self.current_problem.clauses],
+        )
+
+    def _problem_detail_text(self, problem: ProblemInstance) -> str:
+        metadata = problem.metadata or {}
+        if problem.problem_type == "Sudoku":
+            return f"size={metadata.get('size', '?')}, givens={metadata.get('givens', '?')}"
+        if problem.problem_type == "N-Queens":
+            return f"n={metadata.get('size', '?')}"
+        if problem.problem_type == "Independent Set":
+            return f"k={metadata.get('target', '?')}, edges={metadata.get('edges', '-')}"
+        if problem.problem_type in ("Graph Coloring", "Hamiltonian Path"):
+            mode = metadata.get("mode", "")
+            edges = metadata.get("edges", "-")
+            return f"{mode}, edges={edges}" if mode else f"edges={edges}"
+        return ""
+
+    def _refresh_solve_detail_panel(self) -> None:
+        if not hasattr(self, "solve_detail_text"):
+            return
+
+        row = self._solve_detail_row()
+        if row is None:
+            self._write_text_widget(self.solve_detail_text, "Generate or solve a problem to see stats and response.")
+            self._write_text_widget(self.solve_input_text, "Generate or solve a problem to see problem-specific input data.")
+            self._clear_solve_graph_preview("Generate or solve a graph problem to preview it.")
+            self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            return
+
+        self._write_text_widget(self.solve_detail_text, self._format_benchmark_row_details(row))
+        self.solve_input_label.set(self._benchmark_problem_data_label(row))
+        self._write_text_widget(self.solve_input_text, self._format_benchmark_problem_data(row))
+
+        if not self._is_graph_benchmark_row(row):
+            self._clear_solve_graph_preview(f"{row.problem_type} rows show their data in the Input tab.")
+            self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            return
+
+        if not row.graph_edges and row.node_count == "-":
+            self._clear_solve_graph_preview("No graph data stored for this problem.")
+            self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            return
+
+        policy = self._graph_preview_policy(row.node_count, len(row.graph_edges))
+        if policy == "auto":
+            self.refresh_solve_graph_button.configure(state=tk.NORMAL)
+            self.render_solve_graph(force=False)
+        elif policy == "manual":
+            self.refresh_solve_graph_button.configure(state=tk.NORMAL)
+            self._clear_solve_graph_preview("Graph is moderately large; use Refresh graph when needed.")
+        else:
+            self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            self._clear_solve_graph_preview("Graph too large to preview safely.")
+
+    def copy_solve_data(self) -> None:
+        row = self._solve_detail_row()
+        if row is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._format_benchmark_problem_data(row))
+
+    def copy_solve_response(self) -> None:
+        row = self._solve_detail_row()
+        if row is None or row.decoded is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._format_decoded(row.decoded))
 
     def _format_solve_result(self, result) -> str:
         lines = [
@@ -840,7 +1118,7 @@ class SATApp:
         )
 
         if path:
-            save_dimacs(path, self.current_problem.clauses, [self.current_problem.name])
+            save_dimacs(path, self.current_problem.clauses, [self.current_problem.name, f"type={self.current_problem.problem_type}"])
             self._write_result(f"Saved CNF to {path}")
 
     def load_dimacs_dialog(self) -> None:
@@ -854,20 +1132,102 @@ class SATApp:
 
         try:
             clauses = load_dimacs(path)
-            text = clauses_to_dimacs(clauses, [Path(path).name])
+            original_text = Path(path).read_text(encoding="utf-8")
+            inferred_type = self._infer_dimacs_problem_type(original_text)
+            chosen_type = self._choose_loaded_dimacs_type(inferred_type)
+            if chosen_type is None:
+                return
+
+            text = clauses_to_dimacs(clauses, [Path(path).name, f"type={chosen_type}"])
             self.problem_kind.set("DIMACS/CNF")
             self._refresh_problem_form()
+            self.dimacs_loaded_problem_type.set(chosen_type)
             self.dimacs_input.delete("1.0", tk.END)
             self.dimacs_input.insert("1.0", text)
-            self.current_problem = dimacs_problem_from_text(text, name=Path(path).name)
+            self.current_problem = dimacs_problem_from_text(text, name=Path(path).name, problem_type=chosen_type)
+            self.latest_solve_result = None
             self.cnf_text.delete("1.0", tk.END)
             self.cnf_text.insert("1.0", text)
-            self._write_result(f"Loaded {len(clauses)} clauses from {path}")
+            self._write_result(f"Loaded {len(clauses)} clauses from {path}\nType: {chosen_type}")
+            self._refresh_solve_detail_panel()
         except Exception as exc:
             messagebox.showerror("Cannot load DIMACS", str(exc))
 
+    def _infer_dimacs_problem_type(self, text: str) -> str:
+        valid_types = {"DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"}
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("c"):
+                continue
+            comment = line[1:].strip()
+            if comment.startswith("type="):
+                problem_type = comment.split("=", 1)[1].strip()
+                if problem_type in valid_types:
+                    return problem_type
+        return "DIMACS"
+
+    def _choose_loaded_dimacs_type(self, initial_type: str) -> str | None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Choose Problem Type")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        chosen = tk.StringVar(value=initial_type)
+        result = {"value": None}
+
+        ttk.Label(dialog, text="Treat loaded CNF as:").grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 6))
+        ttk.Combobox(
+            dialog,
+            textvariable=chosen,
+            values=("DIMACS", "Sudoku", "Graph Coloring", "N-Queens", "Hamiltonian Path", "Independent Set"),
+            state="readonly",
+            width=28,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=12)
+        ttk.Label(
+            dialog,
+            text="This labels the loaded CNF for solving/details. Decoded answers need original encoder metadata.",
+            wraplength=320,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 12))
+
+        def accept() -> None:
+            result["value"] = chosen.get()
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Cancel", command=cancel).grid(row=3, column=0, sticky="ew", padx=(12, 4), pady=(0, 12))
+        ttk.Button(dialog, text="Load", command=accept).grid(row=3, column=1, sticky="ew", padx=(4, 12), pady=(0, 12))
+        dialog.columnconfigure(0, weight=1)
+        dialog.columnconfigure(1, weight=1)
+        self._center_dialog(dialog)
+        dialog.wait_window()
+        return result["value"]
+
+    def _center_dialog(self, dialog) -> None:
+        dialog.update_idletasks()
+        width = dialog.winfo_width()
+        height = dialog.winfo_height()
+
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_width = self.root.winfo_width()
+        root_height = self.root.winfo_height()
+
+        if root_width > 1 and root_height > 1:
+            x = root_x + (root_width - width) // 2
+            y = root_y + (root_height - height) // 2
+        else:
+            x = (dialog.winfo_screenwidth() - width) // 2
+            y = (dialog.winfo_screenheight() - height) // 2
+
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+
     def _build_benchmark_tab(self) -> None:
         self.benchmark_tab.columnconfigure(1, weight=1)
+        self.benchmark_tab.columnconfigure(2, weight=0, minsize=420)
         self.benchmark_tab.rowconfigure(1, weight=1)
 
         self.benchmark_controls = ttk.LabelFrame(self.benchmark_tab, text="Benchmark", padding=8)
@@ -887,14 +1247,21 @@ class SATApp:
         self.bench_timeout_seconds = tk.StringVar(value="30")
         self.bench_seed = tk.StringVar(value="1")
         self.bench_cdcl = tk.BooleanVar(value=True)
-        self.bench_dpll = tk.BooleanVar(value=True)
+        self.bench_dpll = tk.BooleanVar(value=False)
         self.bench_advanced_solver_logs = tk.BooleanVar(value=False)
         self.bench_solver_log_level = tk.StringVar(value="Periodic progress")
+        self.bench_cdcl_branching = tk.StringVar(value="VSIDS")
+        self.bench_cdcl_initial_phase = tk.StringVar(value="Positive first")
+        self.bench_cdcl_restarts = tk.BooleanVar(value=False)
+        self.bench_cdcl_restart_interval = tk.StringVar(value="100")
+        self.bench_cdcl_learned_clause_limit = tk.StringVar(value="")
+        self.bench_cdcl_random_seed = tk.StringVar(value="")
         self.bench_sudoku_size_vars = {
             size: tk.BooleanVar(value=size in (4, 9))
             for size in SUDOKU_BENCHMARK_SIZES
         }
         self.chart_metric = tk.StringVar(value="Raw Time")
+        self.chart_view = tk.StringVar(value="Raw runs")
 
         ttk.Label(self.benchmark_controls, text="Problem").grid(row=0, column=0, sticky="w")
         problem_box = ttk.Combobox(
@@ -943,6 +1310,17 @@ class SATApp:
             width=16,
         )
         self.bench_log_box.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self._build_cdcl_option_controls(
+            self.benchmark_controls,
+            8,
+            self.bench_cdcl_branching,
+            self.bench_cdcl_initial_phase,
+            self.bench_cdcl_restarts,
+            self.bench_cdcl_restart_interval,
+            self.bench_cdcl_learned_clause_limit,
+            self.bench_cdcl_random_seed,
+            width=16,
+        )
 
         self.run_benchmark_button = ttk.Button(self.benchmark_controls, text="Run Benchmark", command=self.run_benchmark)
         self.skip_benchmark_button = ttk.Button(
@@ -953,55 +1331,130 @@ class SATApp:
         )
         self.export_csv_button = ttk.Button(self.benchmark_controls, text="Export CSV", command=self.export_benchmark_csv)
         self.export_chart_button = ttk.Button(self.benchmark_controls, text="Export Chart", command=self.export_benchmark_chart)
-        self.run_benchmark_button.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        self.skip_benchmark_button.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.export_csv_button.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.export_chart_button.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.run_benchmark_button.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.skip_benchmark_button.grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.export_csv_button.grid(row=15, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.export_chart_button.grid(row=16, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.controls_to_disable.extend([self.run_benchmark_button, self.export_csv_button, self.export_chart_button])
 
-        ttk.Label(self.benchmark_controls, text="Chart").grid(row=12, column=0, sticky="w", pady=(12, 0))
+        ttk.Label(self.benchmark_controls, text="Metric").grid(row=17, column=0, sticky="w", pady=(12, 0))
         ttk.Combobox(
             self.benchmark_controls,
             textvariable=self.chart_metric,
             values=("Raw Time", "Log Time", "Normalized Time", "Conflicts", "Decisions"),
             state="readonly",
             width=16,
-        ).grid(row=12, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
-        ttk.Button(self.benchmark_controls, text="Refresh Chart", command=self.draw_benchmark_chart).grid(row=13, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ).grid(row=17, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+        ttk.Label(self.benchmark_controls, text="View").grid(row=18, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            self.benchmark_controls,
+            textvariable=self.chart_view,
+            values=("Raw runs", "Average repeats"),
+            state="readonly",
+            width=16,
+        ).grid(row=18, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Button(self.benchmark_controls, text="Refresh Chart", command=self.draw_benchmark_chart).grid(row=19, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
         table_frame = ttk.Frame(self.benchmark_tab)
         table_frame.grid(row=0, column=1, sticky="nsew")
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
-        columns = ("case", "type", "detail", "solver", "status", "time", "conflicts", "decisions")
+        columns = ("case", "type", "detail", "solver", "options", "status", "time", "conflicts", "decisions")
         self.benchmark_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=10)
         headings = {
             "case": "Case",
             "type": "Type",
             "detail": "Detail",
             "solver": "Solver",
+            "options": "Options",
             "status": "Status",
             "time": "Time",
             "conflicts": "Conflicts",
             "decisions": "Decisions",
         }
-        widths = {"case": 240, "detail": 170}
+        widths = {"case": 240, "detail": 170, "options": 180}
         for column in columns:
             self.benchmark_table.heading(column, text=headings[column])
             self.benchmark_table.column(column, width=widths.get(column, 100))
         self.benchmark_table.grid(row=0, column=0, sticky="nsew")
+        self.benchmark_table.bind("<<TreeviewSelect>>", self._on_benchmark_row_selected)
         table_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.benchmark_table.yview)
         table_scroll.grid(row=0, column=1, sticky="ns")
-        self.benchmark_table.configure(yscrollcommand=table_scroll.set)
+        table_xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.benchmark_table.xview)
+        table_xscroll.grid(row=1, column=0, sticky="ew")
+        self.benchmark_table.configure(yscrollcommand=table_scroll.set, xscrollcommand=table_xscroll.set)
 
         self.chart_frame = ttk.LabelFrame(self.benchmark_tab, text="Chart", padding=8)
         self.chart_frame.grid(row=1, column=1, sticky="nsew", pady=(10, 0))
         self.chart_frame.rowconfigure(0, weight=1)
         self.chart_frame.columnconfigure(0, weight=1)
 
+        self._build_benchmark_detail_panel()
+
         self._refresh_benchmark_form()
         self._refresh_benchmark_log_controls()
+
+    def _build_benchmark_detail_panel(self) -> None:
+        self.benchmark_detail_frame = ttk.LabelFrame(self.benchmark_tab, text="Selected Case", padding=8)
+        self.benchmark_detail_frame.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(10, 0))
+        self.benchmark_detail_frame.columnconfigure(0, weight=1)
+        self.benchmark_detail_frame.rowconfigure(0, weight=1)
+        self.benchmark_detail_frame.rowconfigure(1, weight=2)
+
+        summary_frame = ttk.Frame(self.benchmark_detail_frame)
+        summary_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        summary_frame.rowconfigure(1, weight=1)
+        summary_frame.columnconfigure(0, weight=1)
+        ttk.Label(summary_frame, text="Stats and response").grid(row=0, column=0, sticky="w")
+        self.benchmark_detail_text = tk.Text(summary_frame, height=8, width=42, wrap=tk.WORD)
+        self.benchmark_detail_text.grid(row=1, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(summary_frame, orient=tk.VERTICAL, command=self.benchmark_detail_text.yview)
+        detail_scroll.grid(row=1, column=1, sticky="ns")
+        self.benchmark_detail_text.configure(yscrollcommand=detail_scroll.set)
+        benchmark_detail_buttons = ttk.Frame(summary_frame)
+        benchmark_detail_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        benchmark_detail_buttons.columnconfigure(0, weight=1)
+        benchmark_detail_buttons.columnconfigure(1, weight=1)
+        ttk.Button(benchmark_detail_buttons, text="Copy response", command=self.copy_benchmark_response).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(benchmark_detail_buttons, text="Save CNF", command=self.save_selected_benchmark_cnf).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        self.benchmark_detail_notebook = ttk.Notebook(self.benchmark_detail_frame)
+        self.benchmark_detail_notebook.grid(row=1, column=0, sticky="nsew")
+
+        edge_frame = ttk.Frame(self.benchmark_detail_notebook, padding=6)
+        edge_frame.rowconfigure(1, weight=1)
+        edge_frame.columnconfigure(0, weight=1)
+        self.benchmark_detail_notebook.add(edge_frame, text="Input")
+        self.benchmark_input_label = tk.StringVar(value="Problem data")
+        ttk.Label(edge_frame, textvariable=self.benchmark_input_label).grid(row=0, column=0, sticky="w")
+        self.benchmark_edge_text = tk.Text(edge_frame, height=14, width=42, wrap=tk.WORD)
+        self.benchmark_edge_text.grid(row=1, column=0, sticky="nsew")
+        edge_scroll = ttk.Scrollbar(edge_frame, orient=tk.VERTICAL, command=self.benchmark_edge_text.yview)
+        edge_scroll.grid(row=1, column=1, sticky="ns")
+        self.benchmark_edge_text.configure(yscrollcommand=edge_scroll.set)
+        ttk.Button(edge_frame, text="Copy data", command=self.copy_benchmark_edges).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        preview_frame = ttk.Frame(self.benchmark_detail_notebook, padding=6)
+        preview_frame.rowconfigure(2, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+        self.benchmark_detail_notebook.add(preview_frame, text="Graph")
+        self.graph_preview_status = tk.StringVar(value="Select a graph benchmark row to preview it.")
+        ttk.Label(preview_frame, textvariable=self.graph_preview_status, wraplength=360).grid(row=0, column=0, sticky="ew")
+        self.render_graph_button = ttk.Button(
+            preview_frame,
+            text="Refresh graph",
+            command=lambda: self.render_selected_benchmark_graph(force=True),
+            state=tk.DISABLED,
+        )
+        self.render_graph_button.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        self.graph_preview_frame = ttk.Frame(preview_frame)
+        self.graph_preview_frame.grid(row=2, column=0, sticky="nsew")
+        self.graph_preview_frame.rowconfigure(0, weight=1)
+        self.graph_preview_frame.columnconfigure(0, weight=1)
+
+        self._write_text_widget(self.benchmark_detail_text, "Select a benchmark row to see its stats and response.")
+        self._write_text_widget(self.benchmark_edge_text, "Select a benchmark row to see problem-specific input data.")
 
     def _refresh_benchmark_form(self) -> None:
         for child in self.benchmark_input_frame.winfo_children():
@@ -1217,14 +1670,20 @@ class SATApp:
             messagebox.showerror("Benchmark failed", str(exc))
 
     def _fill_benchmark_table(self) -> None:
+        self.benchmark_row_by_item = {}
         for item in self.benchmark_table.get_children():
             self.benchmark_table.delete(item)
 
         for row in self.benchmark_rows:
             self._insert_benchmark_row(row)
+        self.selected_benchmark_row = None
+        if hasattr(self, "benchmark_detail_text"):
+            self._write_text_widget(self.benchmark_detail_text, "Select a benchmark row to see its stats and response.")
+            self._write_text_widget(self.benchmark_edge_text, "Select a benchmark row to see problem-specific input data.")
+            self._clear_benchmark_graph_preview("Select a graph benchmark row to preview it.")
 
     def _insert_benchmark_row(self, row: BenchmarkRow) -> None:
-        self.benchmark_table.insert(
+        item = self.benchmark_table.insert(
             "",
             tk.END,
             values=(
@@ -1232,12 +1691,467 @@ class SATApp:
                 row.problem_type,
                 row.detail,
                 row.solver,
+                row.solver_options,
                 row.status,
                 f"{row.elapsed:.6f}s",
                 row.conflicts,
                 row.decisions,
             ),
         )
+        self.benchmark_row_by_item[item] = row
+
+    def _on_benchmark_row_selected(self, _event=None) -> None:
+        selected = self.benchmark_table.selection()
+        if not selected:
+            return
+
+        row = self.benchmark_row_by_item.get(selected[0])
+        if row is None:
+            return
+
+        self.selected_benchmark_row = row
+        self._show_benchmark_row_details(row)
+
+    def _show_benchmark_row_details(self, row: BenchmarkRow) -> None:
+        self._write_text_widget(self.benchmark_detail_text, self._format_benchmark_row_details(row))
+        self.benchmark_input_label.set(self._benchmark_problem_data_label(row))
+        self._write_text_widget(self.benchmark_edge_text, self._format_benchmark_problem_data(row))
+
+        if not self._is_graph_benchmark_row(row):
+            self._clear_benchmark_graph_preview(f"{row.problem_type} rows show their data in the Input tab.")
+            self.render_graph_button.configure(state=tk.DISABLED)
+            return
+
+        if not row.graph_edges and row.node_count == "-":
+            self._clear_benchmark_graph_preview("No graph data stored for this benchmark row.")
+            self.render_graph_button.configure(state=tk.DISABLED)
+            return
+
+        policy = self._graph_preview_policy(row.node_count, len(row.graph_edges))
+        if policy == "auto":
+            self.render_graph_button.configure(state=tk.NORMAL)
+            self.render_selected_benchmark_graph(force=False)
+        elif policy == "manual":
+            self.render_graph_button.configure(state=tk.NORMAL)
+            self._clear_benchmark_graph_preview("Graph is moderately large; use Refresh graph when needed.")
+        else:
+            self.render_graph_button.configure(state=tk.DISABLED)
+            self._clear_benchmark_graph_preview("Graph too large to preview safely.")
+
+    def _format_benchmark_row_details(self, row: BenchmarkRow) -> str:
+        lines = [
+            f"Case: {row.case_name}",
+            f"Repeat: {row.repeat}",
+            f"Solver: {row.solver}",
+            f"Status: {row.status}",
+            f"Time: {row.elapsed:.6f}s",
+            f"Clauses: {row.clauses}",
+            f"Variables: {row.variables}",
+            f"Conflicts: {row.conflicts}",
+            f"Decisions: {row.decisions}",
+            f"Propagations: {row.propagations}",
+            f"Learned clauses: {row.learned_clauses}",
+        ]
+        if row.solver_options:
+            lines.append(f"Solver options: {row.solver_options}")
+
+        lines.extend(self._benchmark_problem_summary_lines(row))
+
+        if row.detail:
+            lines.append(f"Detail: {row.detail}")
+        if row.decoded is not None:
+            lines.extend(["", "Decoded response:", self._format_decoded(row.decoded)])
+
+        return "\n".join(lines)
+
+    def _benchmark_problem_summary_lines(self, row: BenchmarkRow) -> list[str]:
+        metadata = row.problem_metadata or {}
+        if row.problem_type == "Sudoku":
+            size = metadata.get("size", "?")
+            return [
+                f"Size: {size}x{size}",
+                f"Box size: {metadata.get('box_size', '-')}",
+                f"Givens: {metadata.get('givens', '-')}",
+                f"Empty cells: {metadata.get('empty_cells', '-')}",
+                f"Generation: {row.generation_mode or metadata.get('mode', '-')}",
+            ]
+
+        if row.problem_type == "N-Queens":
+            return [
+                f"Board: {metadata.get('size', '?')}x{metadata.get('size', '?')}",
+                f"Queens: {metadata.get('queens', metadata.get('size', '-'))}",
+                f"Board cells: {metadata.get('board_cells', '-')}",
+            ]
+
+        if self._is_graph_benchmark_row(row):
+            nodes = self._safe_int(row.node_count)
+            edges = len(row.graph_edges) if row.graph_edges else self._safe_int(row.edge_count)
+            density = "-"
+            if nodes and nodes > 1 and edges is not None:
+                density = f"{(2 * edges / (nodes * (nodes - 1))):.4f}"
+            return [
+                f"Nodes: {row.node_count}",
+                f"Edges: {edges if edges is not None else row.edge_count}",
+                f"Density: {density}",
+                f"Generation: {row.generation_mode or '-'}",
+                f"Seed: {row.seed}",
+            ]
+
+        return []
+
+    def _benchmark_problem_data_label(self, row: BenchmarkRow) -> str:
+        if row.problem_type == "Sudoku":
+            return "Sudoku puzzle"
+        if row.problem_type == "N-Queens":
+            return "N-Queens board"
+        if self._is_graph_benchmark_row(row):
+            return "Graph edges"
+        return "Problem data"
+
+    def _format_benchmark_problem_data(self, row: BenchmarkRow) -> str:
+        if row.problem_type == "Sudoku":
+            return self._format_sudoku_benchmark_data(row)
+        if row.problem_type == "N-Queens":
+            return self._format_n_queens_benchmark_data(row)
+        if self._is_graph_benchmark_row(row):
+            return self._format_benchmark_edges(row.graph_edges, row.node_count)
+        return "No extra problem data stored for this row."
+
+    def _format_sudoku_benchmark_data(self, row: BenchmarkRow) -> str:
+        metadata = row.problem_metadata or {}
+        lines = []
+        grid = metadata.get("grid")
+        if grid:
+            lines.append("Initial puzzle:")
+            lines.append(self._format_grid_with_dots(grid))
+        else:
+            lines.append("No initial Sudoku grid stored for this row.")
+
+        if isinstance(row.decoded, list):
+            lines.extend(["", "Solved grid:", self._format_decoded(row.decoded)])
+        return "\n".join(lines)
+
+    def _format_n_queens_benchmark_data(self, row: BenchmarkRow) -> str:
+        metadata = row.problem_metadata or {}
+        lines = [
+            f"Board size: {metadata.get('size', '?')}x{metadata.get('size', '?')}",
+            f"Queens to place: {metadata.get('queens', metadata.get('size', '-'))}",
+        ]
+        if isinstance(row.decoded, dict):
+            lines.extend(["", self._format_decoded(row.decoded)])
+        else:
+            lines.append("")
+            lines.append("No board response stored for this row.")
+        return "\n".join(lines)
+
+    def _format_grid_with_dots(self, grid: list[list[int]]) -> str:
+        return "\n".join(" ".join("." if value == 0 else str(value) for value in row) for row in grid)
+
+    def _is_graph_benchmark_row(self, row: BenchmarkRow) -> bool:
+        return row.problem_type in GRAPH_PROBLEM_KINDS
+
+    def _format_benchmark_edges(self, edges: list[tuple[int, int]], node_count=None) -> str:
+        if not edges:
+            if self._safe_int(node_count) is not None:
+                return "0 edges"
+            return "No graph edges stored for this row."
+
+        sorted_edges = sorted((int(u), int(v)) for u, v in edges)
+        header = f"{len(sorted_edges)} edges"
+        edge_text = ", ".join(f"{u}-{v}" for u, v in sorted_edges)
+        return f"{header}\n\n{edge_text}"
+
+    def _safe_int(self, value) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _write_text_widget(self, widget, text: str) -> None:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", text)
+        widget.configure(state=tk.DISABLED)
+
+    def _graph_preview_policy(self, node_count, edge_count: int) -> str:
+        nodes = self._safe_int(node_count)
+        if nodes is None:
+            return "skip"
+        if nodes <= 80 and edge_count <= 250:
+            return "auto"
+        if nodes <= 200 and edge_count <= 800:
+            return "manual"
+        return "skip"
+
+    def copy_benchmark_edges(self) -> None:
+        if self.selected_benchmark_row is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._format_benchmark_problem_data(self.selected_benchmark_row))
+
+    def copy_benchmark_response(self) -> None:
+        if self.selected_benchmark_row is None or self.selected_benchmark_row.decoded is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._format_decoded(self.selected_benchmark_row.decoded))
+
+    def _benchmark_row_dimacs(self, row: BenchmarkRow) -> str:
+        if not row.problem_clauses:
+            raise ValueError("This benchmark row does not have CNF clauses stored.")
+
+        comments = [
+            row.case_name,
+            f"type={row.problem_type}",
+            f"solver={row.solver}",
+            f"status={row.status}",
+            f"repeat={row.repeat}",
+            f"variables={row.variables}",
+        ]
+        if row.solver_options:
+            comments.append(f"solver_options={row.solver_options}")
+        if row.detail:
+            comments.append(row.detail)
+        return clauses_to_dimacs(row.problem_clauses, comments)
+
+    def save_selected_benchmark_cnf(self) -> None:
+        row = self.selected_benchmark_row
+        if row is None:
+            messagebox.showinfo("No benchmark row", "Select a benchmark row first.")
+            return
+        if not row.problem_clauses:
+            messagebox.showinfo("No CNF stored", "This benchmark row does not have CNF clauses stored.")
+            return
+
+        safe_name = row.case_name.replace(" ", "_").replace("/", "_")
+        default_name = f"{safe_name}_r{row.repeat}_{row.solver}.cnf"
+        path = filedialog.asksaveasfilename(
+            initialdir=str(INPUT_GENERATED),
+            initialfile=default_name,
+            defaultextension=".cnf",
+            filetypes=[("DIMACS CNF", "*.cnf"), ("All files", "*.*")],
+        )
+
+        if not path:
+            return
+
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(self._benchmark_row_dimacs(row), encoding="utf-8")
+            messagebox.showinfo("Saved", f"Saved benchmark CNF to {path}")
+        except Exception as exc:
+            messagebox.showerror("Cannot save CNF", str(exc))
+
+    def _clear_benchmark_graph_preview(self, message: str) -> None:
+        if self.benchmark_detail_canvas is not None:
+            self.benchmark_detail_canvas.get_tk_widget().destroy()
+            self.benchmark_detail_canvas = None
+        for child in self.graph_preview_frame.winfo_children():
+            child.destroy()
+        self.graph_preview_status.set(message)
+
+    def _clear_solve_graph_preview(self, message: str) -> None:
+        if self.solve_detail_canvas is not None:
+            self.solve_detail_canvas.get_tk_widget().destroy()
+            self.solve_detail_canvas = None
+        for child in self.solve_visual_frame.winfo_children():
+            child.destroy()
+        self.solve_visual_status.set(message)
+
+    def render_selected_benchmark_graph(self, force: bool = False) -> None:
+        row = self.selected_benchmark_row
+        if row is None:
+            return
+
+        if Figure is None or FigureCanvasTkAgg is None:
+            self._clear_benchmark_graph_preview("Matplotlib Tk support is not available.")
+            return
+
+        nodes = self._safe_int(row.node_count)
+        if nodes is None or nodes <= 0:
+            self._clear_benchmark_graph_preview("No graph node data stored for this benchmark row.")
+            return
+
+        policy = self._graph_preview_policy(nodes, len(row.graph_edges))
+        if policy == "skip" and not force:
+            self._clear_benchmark_graph_preview("Graph too large to preview safely.")
+            return
+
+        self._clear_benchmark_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
+        figure = Figure(figsize=(4.4, 2.6), dpi=100)
+        axis = figure.add_subplot(111)
+        positions = self._circular_graph_positions(nodes)
+        edges = sorted((int(u), int(v)) for u, v in row.graph_edges)
+
+        for u, v in edges:
+            if u in positions and v in positions:
+                axis.plot(
+                    [positions[u][0], positions[v][0]],
+                    [positions[u][1], positions[v][1]],
+                    color="#c9c9c9",
+                    linewidth=0.7,
+                    zorder=1,
+                )
+
+        path_edges = self._benchmark_path_edges(row)
+        for u, v in path_edges:
+            if u in positions and v in positions:
+                axis.plot(
+                    [positions[u][0], positions[v][0]],
+                    [positions[u][1], positions[v][1]],
+                    color="#222222",
+                    linewidth=2.0,
+                    zorder=2,
+                )
+
+        node_colors = [self._benchmark_node_color(row, node) for node in range(1, nodes + 1)]
+        node_size = 52 if nodes <= 80 else 20
+        axis.scatter(
+            [positions[node][0] for node in range(1, nodes + 1)],
+            [positions[node][1] for node in range(1, nodes + 1)],
+            c=node_colors,
+            s=node_size,
+            edgecolors="#333333",
+            linewidths=0.4,
+            zorder=3,
+        )
+
+        if nodes <= 80:
+            labels = self._benchmark_node_labels(row, nodes)
+            for node in range(1, nodes + 1):
+                axis.text(
+                    positions[node][0],
+                    positions[node][1],
+                    labels.get(node, str(node)),
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    zorder=4,
+                )
+
+        axis.set_aspect("equal")
+        axis.axis("off")
+        figure.tight_layout()
+
+        self.benchmark_detail_canvas = FigureCanvasTkAgg(figure, master=self.graph_preview_frame)
+        self.benchmark_detail_canvas.draw()
+        self.benchmark_detail_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.graph_preview_status.set(f"Preview: {nodes} nodes, {len(edges)} edges.")
+
+    def render_solve_graph(self, force: bool = False) -> None:
+        row = self._solve_detail_row()
+        if row is None:
+            return
+
+        if Figure is None or FigureCanvasTkAgg is None:
+            self._clear_solve_graph_preview("Matplotlib Tk support is not available.")
+            return
+
+        nodes = self._safe_int(row.node_count)
+        if nodes is None or nodes <= 0:
+            self._clear_solve_graph_preview("No graph node data stored for this problem.")
+            return
+
+        policy = self._graph_preview_policy(nodes, len(row.graph_edges))
+        if policy == "skip" and not force:
+            self._clear_solve_graph_preview("Graph too large to preview safely.")
+            return
+
+        self._clear_solve_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
+        figure = Figure(figsize=(4.4, 2.6), dpi=100)
+        axis = figure.add_subplot(111)
+        positions = self._circular_graph_positions(nodes)
+        edges = sorted((int(u), int(v)) for u, v in row.graph_edges)
+
+        for u, v in edges:
+            if u in positions and v in positions:
+                axis.plot(
+                    [positions[u][0], positions[v][0]],
+                    [positions[u][1], positions[v][1]],
+                    color="#c9c9c9",
+                    linewidth=0.7,
+                    zorder=1,
+                )
+
+        for u, v in self._benchmark_path_edges(row):
+            if u in positions and v in positions:
+                axis.plot(
+                    [positions[u][0], positions[v][0]],
+                    [positions[u][1], positions[v][1]],
+                    color="#222222",
+                    linewidth=2.0,
+                    zorder=2,
+                )
+
+        node_colors = [self._benchmark_node_color(row, node) for node in range(1, nodes + 1)]
+        node_size = 52 if nodes <= 80 else 20
+        axis.scatter(
+            [positions[node][0] for node in range(1, nodes + 1)],
+            [positions[node][1] for node in range(1, nodes + 1)],
+            c=node_colors,
+            s=node_size,
+            edgecolors="#333333",
+            linewidths=0.4,
+            zorder=3,
+        )
+
+        if nodes <= 80:
+            labels = self._benchmark_node_labels(row, nodes)
+            for node in range(1, nodes + 1):
+                axis.text(
+                    positions[node][0],
+                    positions[node][1],
+                    labels.get(node, str(node)),
+                    ha="center",
+                    va="center",
+                    fontsize=6,
+                    zorder=4,
+                )
+
+        axis.set_aspect("equal")
+        axis.axis("off")
+        figure.tight_layout()
+
+        self.solve_detail_canvas = FigureCanvasTkAgg(figure, master=self.solve_visual_frame)
+        self.solve_detail_canvas.draw()
+        self.solve_detail_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.solve_visual_status.set(f"Preview: {nodes} nodes, {len(edges)} edges.")
+
+    def _circular_graph_positions(self, node_count: int) -> dict[int, tuple[float, float]]:
+        positions = {}
+        for index, node in enumerate(range(1, node_count + 1)):
+            angle = 2 * math.pi * index / node_count
+            positions[node] = (math.cos(angle), math.sin(angle))
+        return positions
+
+    def _benchmark_node_color(self, row: BenchmarkRow, node: int) -> str:
+        palette = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#b279a2", "#72b7b2", "#ff9da6", "#9d755d"]
+        if row.problem_type == "Graph Coloring" and isinstance(row.decoded, dict):
+            color = row.decoded.get(node)
+            if color is not None:
+                return palette[(int(color) - 1) % len(palette)]
+        if row.problem_type == "Independent Set" and isinstance(row.decoded, dict):
+            selected = set(row.decoded.get("selected", []))
+            return "#59a14f" if node in selected else "#d8d8d8"
+        if row.problem_type == "Hamiltonian Path" and isinstance(row.decoded, dict):
+            path = row.decoded.get("path", [])
+            return "#edc948" if node in path else "#d8d8d8"
+        return "#4c78a8"
+
+    def _benchmark_path_edges(self, row: BenchmarkRow) -> set[tuple[int, int]]:
+        if row.problem_type != "Hamiltonian Path" or not isinstance(row.decoded, dict):
+            return set()
+        path = row.decoded.get("path", [])
+        edges = set()
+        for left, right in zip(path, path[1:]):
+            u, v = sorted((int(left), int(right)))
+            edges.add((u, v))
+        return edges
+
+    def _benchmark_node_labels(self, row: BenchmarkRow, node_count: int) -> dict[int, str]:
+        if row.problem_type == "Hamiltonian Path" and isinstance(row.decoded, dict):
+            path = row.decoded.get("path", [])
+            return {int(node): str(index) for index, node in enumerate(path, start=1)}
+        return {node: str(node) for node in range(1, node_count + 1)}
 
     def draw_benchmark_chart(self) -> None:
         if not self.benchmark_rows:
@@ -1254,33 +2168,35 @@ class SATApp:
         axis = figure.add_subplot(111)
         metric = self.chart_metric.get()
 
-        x = list(range(len(self.benchmark_rows)))
-        labels = [self._benchmark_chart_label(row) for row in self.benchmark_rows]
-
-        if metric == "Raw Time":
-            y = [row.elapsed for row in self.benchmark_rows]
-            ylabel = "Seconds"
-        elif metric == "Log Time":
-            y = [max(row.elapsed, 1e-9) for row in self.benchmark_rows]
-            ylabel = "Seconds (log)"
+        ylabel = self._benchmark_metric_ylabel(metric)
+        if metric == "Log Time":
             axis.set_yscale("log")
-        elif metric == "Normalized Time":
-            y = [row.elapsed / max(row.variables, 1) for row in self.benchmark_rows]
-            ylabel = "Seconds / variable"
-        elif metric == "Conflicts":
-            y = [0 if row.conflicts == "-" else int(row.conflicts) for row in self.benchmark_rows]
-            ylabel = "Conflicts"
-        else:
-            y = [0 if row.decisions == "-" else int(row.decisions) for row in self.benchmark_rows]
-            ylabel = "Decisions"
 
-        colors = [self._benchmark_bar_color(row.status) for row in self.benchmark_rows]
-        axis.bar(x, y, color=colors)
+        if self.chart_view.get() == "Average repeats":
+            groups = self._aggregate_benchmark_rows(self.benchmark_rows)
+            self._draw_aggregate_bars(axis, groups, metric)
+            labels = [group["label"] for group in groups]
+            x = list(range(len(groups)))
+            statuses = []
+            for group in groups:
+                for status in group["status_counts"]:
+                    if status not in statuses:
+                        statuses.append(status)
+        else:
+            x = list(range(len(self.benchmark_rows)))
+            labels = [self._benchmark_chart_label(row) for row in self.benchmark_rows]
+            y = [self._benchmark_metric_value(row, metric) for row in self.benchmark_rows]
+            if metric == "Log Time":
+                y = [max(value, 1e-9) for value in y]
+            colors = [self._benchmark_bar_color(row.status) for row in self.benchmark_rows]
+            axis.bar(x, y, color=colors)
+            statuses = [row.status for row in self.benchmark_rows]
+
         axis.set_title(self._benchmark_chart_title(metric))
         axis.set_ylabel(ylabel)
         axis.set_xticks(x)
         axis.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-        self._draw_benchmark_status_legend(axis)
+        self._draw_benchmark_status_legend(axis, statuses)
         figure.tight_layout()
 
         self.benchmark_figure = figure
@@ -1305,28 +2221,144 @@ class SATApp:
             case_name = case_name[len(problem_prefix):]
         return f"{case_name}\n{row.solver}"
 
+    def _benchmark_group_key(self, row: BenchmarkRow) -> tuple:
+        return (
+            row.problem_type,
+            row.case_name,
+            row.solver,
+        )
+
+    def _aggregate_benchmark_rows(self, rows: list[BenchmarkRow]) -> list[dict]:
+        groups_by_key = {}
+        groups = []
+        for row in rows:
+            key = self._benchmark_group_key(row)
+            if key not in groups_by_key:
+                group = {
+                    "key": key,
+                    "case_name": row.case_name,
+                    "problem_type": row.problem_type,
+                    "detail": row.detail,
+                    "solver": row.solver,
+                    "clauses": row.clauses,
+                    "variables": row.variables,
+                    "generation_mode": row.generation_mode,
+                    "edge_count": row.edge_count,
+                    "label": self._benchmark_chart_label(row),
+                    "rows": [],
+                    "finished_rows": [],
+                    "status_counts": {},
+                }
+                groups_by_key[key] = group
+                groups.append(group)
+
+            group = groups_by_key[key]
+            group["rows"].append(row)
+            if row.status in ("SAT", "UNSAT"):
+                group["finished_rows"].append(row)
+            group["status_counts"][row.status] = group["status_counts"].get(row.status, 0) + 1
+
+        return groups
+
+    def _benchmark_metric_value(self, row: BenchmarkRow, metric: str) -> float:
+        if metric in ("Raw Time", "Log Time"):
+            return row.elapsed
+        if metric == "Normalized Time":
+            return row.elapsed / max(row.variables, 1)
+        if metric == "Conflicts":
+            return 0 if row.conflicts == "-" else float(row.conflicts)
+        return 0 if row.decisions == "-" else float(row.decisions)
+
+    def _benchmark_group_metric_value(self, group: dict, metric: str) -> float:
+        rows = group["finished_rows"]
+        if not rows:
+            return 0.0
+        return sum(self._benchmark_metric_value(row, metric) for row in rows) / len(rows)
+
+    def _benchmark_metric_ylabel(self, metric: str) -> str:
+        if metric == "Raw Time":
+            return "Seconds"
+        if metric == "Log Time":
+            return "Seconds (log)"
+        if metric == "Normalized Time":
+            return "Seconds / variable"
+        if metric == "Conflicts":
+            return "Conflicts"
+        return "Decisions"
+
+    def _benchmark_status_order(self, statuses) -> list[str]:
+        preferred = ["SAT", "UNSAT", "TIMEOUT", "SKIPPED", "CANCELLED", "UNKNOWN"]
+        seen = set()
+        ordered = []
+        for status in preferred:
+            if status in statuses and status not in seen:
+                ordered.append(status)
+                seen.add(status)
+        for status in statuses:
+            if status not in seen:
+                ordered.append(status)
+                seen.add(status)
+        return ordered
+
+    def _benchmark_status_count_label(self, status_counts: dict[str, int]) -> str:
+        short_names = {
+            "SAT": "S",
+            "UNSAT": "U",
+            "TIMEOUT": "T",
+            "SKIPPED": "K",
+        }
+        parts = []
+        for status in self._benchmark_status_order(status_counts):
+            label = short_names.get(status, status)
+            parts.append(f"{label}:{status_counts[status]}")
+        return " ".join(parts)
+
+    def _draw_aggregate_bars(self, axis, groups: list[dict], metric: str) -> None:
+        placeholder_height = 1e-9 if metric == "Log Time" else 1e-6
+        for index, group in enumerate(groups):
+            average_value = self._benchmark_group_metric_value(group, metric)
+            display_height = average_value if average_value > 0 else placeholder_height
+            total_count = len(group["rows"])
+            bottom = 0.0
+            for status in self._benchmark_status_order(group["status_counts"]):
+                count = group["status_counts"][status]
+                height = display_height * count / total_count if total_count else 0
+                axis.bar(index, height, bottom=bottom, color=self._benchmark_bar_color(status))
+                bottom += height
+
+            axis.text(
+                index,
+                display_height,
+                self._benchmark_status_count_label(group["status_counts"]),
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                rotation=90,
+            )
+        axis.margins(y=0.25)
+
     def _benchmark_chart_title(self, metric: str) -> str:
         problem_types = []
         for row in self.benchmark_rows:
             if row.problem_type not in problem_types:
                 problem_types.append(row.problem_type)
 
+        suffix = " (Average repeats)" if hasattr(self, "chart_view") and self.chart_view.get() == "Average repeats" else ""
         if len(problem_types) == 1:
-            return f"{problem_types[0]} - {metric}"
+            return f"{problem_types[0]} - {metric}{suffix}"
         if problem_types:
-            return f"Mixed Problems - {metric}"
-        return metric
+            return f"Mixed Problems - {metric}{suffix}"
+        return f"{metric}{suffix}"
 
-    def _draw_benchmark_status_legend(self, axis) -> None:
+    def _draw_benchmark_status_legend(self, axis, statuses=None) -> None:
         try:
             from matplotlib.patches import Patch
         except Exception:
             return
 
-        statuses = []
-        for row in self.benchmark_rows:
-            if row.status not in statuses:
-                statuses.append(row.status)
+        if statuses is None:
+            statuses = [row.status for row in self.benchmark_rows]
+        statuses = self._benchmark_status_order(statuses)
 
         handles = [
             Patch(color=self._benchmark_bar_color(status), label=status)

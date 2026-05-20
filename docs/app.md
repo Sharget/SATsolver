@@ -32,6 +32,19 @@ be saved under `input/generated/`. Advanced solver logs can be enabled for
 periodic progress messages or capped verbose debug messages during a solve.
 The solve timeout defaults to 30 seconds; if a solver run exceeds it, the app
 stops that run and reports `TIMEOUT`.
+
+The CDCL advanced options let you experiment with search behavior:
+
+- `CDCL branching`: `VSIDS`, `Most frequent`, `MOMS`, `DLIS`, or `Random`.
+- `Initial phase`: `Positive first`, `Negative first`, `Polarity based`, or
+  `Random`.
+- `Restarts`: optionally restart CDCL every N conflicts while keeping learned
+  clauses and activity scores.
+- `Learned limit`: optionally cap the learned-clause database.
+- `Random seed`: makes random branching and random phase choices repeatable.
+
+These controls are applied only when the selected solver is `CDCL`. `DPLL`
+ignores them and remains a fixed baseline solver.
 Problem descriptions appear beside the controls, and irrelevant graph/log
 settings are disabled as modes change.
 
@@ -50,11 +63,15 @@ larger sizes are opt-in because they can take much longer. N-Queens benchmarks
 sweep board sizes. Hamiltonian Path and Independent Set benchmarks reuse the
 same random graph modes as graph coloring; Independent Set also sweeps target
 `k` values. Benchmark solver logs can use the same normal, periodic progress,
-or capped verbose modes as Solve. Each benchmark solver run also has a timeout,
-defaulting to 30 seconds. Timed-out runs are kept as `TIMEOUT` rows and shown
-as distinct chart bars before the benchmark continues. The chart title shows
-the active problem type, so bar labels stay compact. Results appear in a shared
-table and Matplotlib chart and can be exported to:
+or capped verbose modes as Solve. The benchmark tab also has the same CDCL
+heuristic controls as the Solve tab. The compact option summary is stored in
+each benchmark row, exported in CSV files, shown in the selected-case details,
+and included as a comment when saving a selected benchmark CNF. Each benchmark
+solver run also has a timeout, defaulting to 30 seconds. Timed-out runs are kept
+as `TIMEOUT` rows and shown as distinct chart bars before the benchmark
+continues. The chart title shows the active problem type, so bar labels stay
+compact. Results appear in a shared table and Matplotlib chart and can be
+exported to:
 
 ```text
 output/benchmarks/
@@ -62,9 +79,14 @@ output/benchmarks/
 
 Benchmark rows appear as each solver run finishes. The feed logs each case,
 repeat, CNF generation step, solver start, and solver finish, similar to the old
-console output in `legacy/genearate_graph_coloring.py`. Large benchmark charts are not
-auto-rendered at the end because drawing hundreds of bars can make Tkinter feel
-stuck; use `Refresh Chart` when you want to draw them.
+console output in `legacy/genearate_graph_coloring.py`. Large benchmark charts
+are not auto-rendered at the end because drawing hundreds of bars can make
+Tkinter feel stuck; use `Refresh Chart` when you want to draw them.
+
+Use benchmark heuristic comparisons carefully. Changing branching, phase,
+restarts, learned-clause limits, or random seed changes the CDCL search path,
+so compare runs with the same timeout, problem sweep, solver set, and repeat
+count. Random modes should use a seed when you want reproducible results.
 
 Use probability mode for quick Erdos-Renyi style experiments. Use exact-edge
 mode when you want fixed edge counts. Use average-degree mode for fairer

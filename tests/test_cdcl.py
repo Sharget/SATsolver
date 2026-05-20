@@ -2,6 +2,7 @@ import unittest
 
 from solvers.cdcl import cdcl
 from solvers.dpll import dpll
+from problems.n_queens import n_queens_problem
 from utils.dimacs import read_dimacs_cnf
 from utils.general_utils import color_var, sudoku_var
 from utils.sudoku_general import generate_sudoku_clauses
@@ -74,6 +75,64 @@ class CDCLTests(unittest.TestCase):
         self.assertEqual(cdcl_solution is None, dpll_solution is None)
         if cdcl_solution is not None:
             self.assertTrue(satisfies(formula, cdcl_solution))
+
+    def test_n_queens_sat_with_limited_conflicts(self):
+        problem = n_queens_problem(15)
+
+        solution, stats = cdcl(problem.clauses, max_conflicts=500, return_stats=True)
+
+        self.assertEqual(stats["status"], "SAT")
+        self.assertTrue(satisfies(problem.clauses, solution))
+
+    def test_branching_modes_solve_representative_formula(self):
+        formula = [[1, 2], [-1, 2], [1, -2]]
+
+        for branching in ("VSIDS", "Most frequent", "MOMS", "DLIS", "Random"):
+            with self.subTest(branching=branching):
+                solution, stats = cdcl(
+                    formula,
+                    return_stats=True,
+                    logging_options={"branching": branching, "random_seed": 7},
+                )
+                self.assertEqual(stats["status"], "SAT")
+                self.assertTrue(satisfies(formula, solution))
+
+    def test_phase_modes_accept_seeded_runs(self):
+        formula = [[1, 2], [-1, 2], [1, -2]]
+
+        for phase in ("Positive first", "Negative first", "Polarity based", "Random"):
+            with self.subTest(phase=phase):
+                first, first_stats = cdcl(
+                    formula,
+                    return_stats=True,
+                    logging_options={"initial_phase": phase, "random_seed": 11},
+                )
+                second, second_stats = cdcl(
+                    formula,
+                    return_stats=True,
+                    logging_options={"initial_phase": phase, "random_seed": 11},
+                )
+                self.assertEqual(first_stats["status"], "SAT")
+                self.assertEqual(second_stats["status"], "SAT")
+                self.assertEqual(first, second)
+
+    def test_restarts_and_learned_clause_limit_preserve_correctness(self):
+        formula = [
+            [1, 2],
+            [1, -2],
+            [-1, 2],
+            [-1, -2],
+        ]
+
+        solution, stats = cdcl(
+            formula,
+            return_stats=True,
+            logging_options={"restart_interval": 1, "learned_clause_limit": 1},
+        )
+
+        self.assertIsNone(solution)
+        self.assertEqual(stats["status"], "UNSAT")
+        self.assertIn("restarts", stats)
 
     def test_encoder_split_and_sudoku_generation(self):
         self.assertEqual(sudoku_var(1, 2, 3), 10203)
