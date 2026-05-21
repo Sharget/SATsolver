@@ -4,3 +4,4 @@ __pycache__/
 input/generated/
 output/
 .DS_Store
+venv
