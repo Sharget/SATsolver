@@ -17,6 +17,9 @@ When WalkSAT returns `SAT`, the assignment satisfies every clause.
 When WalkSAT returns `UNKNOWN`, it means the search budget ended before a
 solution was found. The formula might still be SAT. WalkSAT does not report
 `UNSAT` because failing to find a solution is not a proof that none exists.
+The detailed stats include `termination_reason`; normal budget exhaustion is
+reported there as `budget_exhausted`, while timeouts and cancellations still use
+the public statuses `TIMEOUT` and `CANCELLED`.
 
 ## Search Loop
 
@@ -51,6 +54,22 @@ The greedy repair score uses the same occurrence lists. For a candidate
 variable, the solver estimates how many clauses would be unsatisfied after the
 flip by checking only clauses where that variable appears.
 
+The same calculation also records make/break information:
+
+- `make`: unsatisfied clauses that would become satisfied after the flip.
+- `break`: satisfied clauses that would become unsatisfied after the flip.
+- `unsatisfied_after`: total unsatisfied clauses predicted after the flip.
+
+These values are exposed in aggregate stats as `flip_make_total`,
+`flip_break_total`, `last_make`, and `last_break`.
+
+## Best Assignment
+
+WalkSAT now keeps `best_assignment` in its stats. This is the assignment that
+achieved the lowest `best_unsatisfied` count during the run. It can differ from
+the final assignment when the search later moves away from the best partial
+state before the budget ends.
+
 ## Noise
 
 When choosing a variable to flip, WalkSAT mixes two behaviors:
@@ -63,6 +82,37 @@ The `noise` value controls how often the random choice is used. Randomness helps
 the solver escape unlucky local minima where every obvious greedy move looks
 bad.
 
+## Strategy Modes
+
+The default `Classic WalkSAT` strategy keeps the original random-vs-greedy
+choice.
+
+The `ProbSAT` strategy uses the same random-noise override, but its repair step
+chooses probabilistically from the variables in the unsatisfied clause. Variables
+with higher make and lower break receive more weight:
+
+```text
+weight = (make + 1) / ((break + 1) ^ 2)
+```
+
+This keeps the search stochastic while favoring flips that repair clauses
+without damaging many already-satisfied clauses.
+
+## Adaptive Noise
+
+Adaptive noise is optional and off by default. When enabled, WalkSAT starts from
+the configured `noise`. If it stagnates without improving `best_unsatisfied`, it
+raises noise gradually up to `0.9`. When it finds a new best assignment, it
+reduces noise back toward the original configured value. The final value is
+reported as `final_noise`.
+
+## Logging
+
+With periodic or verbose solver logs enabled, WalkSAT prints its strategy,
+current noise, adaptive-noise state, and last make/break values in progress
+messages. Verbose debug mode also prints ProbSAT flip weights and adaptive noise
+adjustments when they occur.
+
 ## App Controls
 
 The app exposes WalkSAT controls in a compact `WalkSAT Options` group:
@@ -71,6 +121,9 @@ The app exposes WalkSAT controls in a compact `WalkSAT Options` group:
 - `Max flips`: maximum flips per try. Default: `10000`.
 - `Noise`: probability of making a random flip instead of a greedy repair
   flip. Default: `0.5`.
+- `Strategy`: `Classic WalkSAT` or `ProbSAT`.
+- `Adaptive noise`: optional stagnation response that adjusts noise during the
+  run.
 - `Random seed`: optional seed for reproducible WalkSAT runs.
 
 The solve timeout still applies. A timeout returns `TIMEOUT`, while a normal
@@ -89,6 +142,8 @@ solution, stats = walksat(
 )
 
 print(stats["status"])
+print(stats["termination_reason"])
+print(stats["best_unsatisfied"])
 print(solution)
 ```
 

@@ -84,8 +84,10 @@ PROBLEM_DESCRIPTIONS = {
 SOLVER_GUIDE_ROWS = (
     ("CDCL", "Complete; learns clauses, backjumps, strongest default for hard formulas."),
     ("DPLL", "Complete; recursive baseline, simpler and useful for comparison."),
-    ("WalkSAT", "Incomplete; random local search, fast on some SAT cases, UNKNOWN if no model is found."),
+    ("WalkSAT", "Incomplete local search; Classic mixes random/greedy flips, ProbSAT favors low-break repairs, UNKNOWN if no model is found."),
 )
+
+WALKSAT_STRATEGIES = ("Classic WalkSAT", "ProbSAT")
 
 
 @dataclass
@@ -159,6 +161,7 @@ class SATApp:
 
         self._configure_styles()
         self._build_layout()
+        self.root.bind("<Control-w>", lambda _event: self.root.destroy())
         self.root.after(100, self._poll_run_events)
 
     def _configure_styles(self) -> None:
@@ -194,13 +197,22 @@ class SATApp:
 
     def _build_layout(self) -> None:
         self.notebook = ttk.Notebook(self.root)
-        self.solve_tab = self._build_scrollable_tab("Solve")
-        self.benchmark_tab = self._build_scrollable_tab("Benchmarks")
+        self.solve_tab = self._build_tab("Solve")
+        self.benchmark_tab = self._build_tab("Benchmarks")
         self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.root.bind_all("<MouseWheel>", self._scroll_local_panel, add="+")
+        self.root.bind_class("TCombobox", "<MouseWheel>", self._scroll_page_from_combobox)
 
         self._build_solve_tab()
         self._build_benchmark_tab()
         self._build_runtime_panel()
+
+    def _build_tab(self, title: str) -> ttk.Frame:
+        tab = ttk.Frame(self.notebook, padding=10)
+        tab.rowconfigure(1, weight=1)
+        tab.columnconfigure(0, weight=1)
+        self.notebook.add(tab, text=title)
+        return tab
 
     def _build_scrollable_tab(self, title: str) -> ttk.Frame:
         tab = ttk.Frame(self.notebook)
@@ -267,6 +279,39 @@ class SATApp:
         self.notebook.add(tab, text=title)
         return content
 
+    def _build_top_toolbar(self, parent) -> ttk.Frame:
+        toolbar = ttk.Frame(parent, padding=(0, 0, 0, 8))
+        toolbar.columnconfigure(99, weight=1)
+        return toolbar
+
+    def _toolbar_button(self, parent, text: str, command, *, style: str | None = None, state=tk.NORMAL):
+        return ttk.Button(parent, text=text, command=command, style=style, state=state)
+
+    def _build_scrollable_panel(self, parent) -> ttk.Frame:
+        parent.rowconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
+        yscroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=yscroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+
+        content = ttk.Frame(canvas, padding=(0, 0, 8, 0))
+        content._tab_scroll_canvas = canvas
+        parent._tab_scroll_canvas = canvas
+        content_window = canvas.create_window(0, 0, window=content, anchor="nw")
+
+        def update_scroll_region(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def resize_content(event) -> None:
+            canvas.itemconfigure(content_window, width=event.width)
+            update_scroll_region()
+
+        content.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", resize_content)
+        return content
+
     def _scroll_page_from_combobox(self, event) -> str:
         widget = event.widget
         while widget is not None:
@@ -279,6 +324,25 @@ class SATApp:
                 return "break"
             widget = getattr(widget, "master", None)
         return "break"
+
+    def _scroll_local_panel(self, event) -> str | None:
+        widget = event.widget
+        while widget is not None:
+            try:
+                widget_class = widget.winfo_class()
+            except tk.TclError:
+                return None
+            if widget_class in {"Text", "Treeview", "Entry", "TEntry", "Spinbox", "TSpinbox"}:
+                return None
+            canvas = getattr(widget, "_tab_scroll_canvas", None)
+            if canvas is not None:
+                if event.state & 0x0001:
+                    canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+                else:
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            widget = getattr(widget, "master", None)
+        return None
 
     def _build_runtime_panel(self) -> None:
         panel = ttk.LabelFrame(self.root, text="Run Feed", padding=8)
@@ -448,6 +512,8 @@ class SATApp:
 
         if hasattr(self, "solve_cancel_button"):
             self.solve_cancel_button.configure(state=tk.NORMAL if solve_running else tk.DISABLED)
+        if hasattr(self, "solve_toolbar_cancel_button"):
+            self.solve_toolbar_cancel_button.configure(state=tk.NORMAL if solve_running else tk.DISABLED)
         if hasattr(self, "solve_load_button"):
             can_load = solve_job is not None and solve_job.problem is not None
             self.solve_load_button.configure(state=tk.NORMAL if can_load else tk.DISABLED)
@@ -458,6 +524,8 @@ class SATApp:
 
         if hasattr(self, "benchmark_cancel_button"):
             self.benchmark_cancel_button.configure(state=tk.NORMAL if benchmark_running else tk.DISABLED)
+        if hasattr(self, "benchmark_toolbar_cancel_button"):
+            self.benchmark_toolbar_cancel_button.configure(state=tk.NORMAL if benchmark_running else tk.DISABLED)
         if hasattr(self, "benchmark_skip_job_button"):
             self.benchmark_skip_job_button.configure(state=tk.NORMAL if can_skip else tk.DISABLED)
         if hasattr(self, "skip_benchmark_button"):
@@ -854,22 +922,92 @@ class SATApp:
         self._refresh_solve_detail_panel()
 
     def _build_solve_tab(self) -> None:
-        self.solve_tab.columnconfigure(0, weight=0)
-        self.solve_tab.columnconfigure(1, weight=1)
-        self.solve_tab.columnconfigure(2, weight=0, minsize=420)
-        self.solve_tab.rowconfigure(0, weight=1)
+        self.problem_kind = tk.StringVar(value="Sudoku")
+        self.solver_name = tk.StringVar(value="CDCL")
+        self.solve_timeout_seconds = tk.StringVar(value="30")
+        self.advanced_solver_logs = tk.BooleanVar(value=False)
+        self.solver_log_level = tk.StringVar(value="Periodic progress")
+        self.cdcl_branching = tk.StringVar(value="VSIDS")
+        self.cdcl_initial_phase = tk.StringVar(value="Positive first")
+        self.cdcl_restarts = tk.BooleanVar(value=False)
+        self.cdcl_restart_interval = tk.StringVar(value="100")
+        self.cdcl_learned_clause_limit = tk.StringVar(value="")
+        self.cdcl_random_seed = tk.StringVar(value="")
+        self.walksat_max_tries = tk.StringVar(value="10")
+        self.walksat_max_flips = tk.StringVar(value="10000")
+        self.walksat_noise = tk.StringVar(value="0.5")
+        self.walksat_selection_mode = tk.StringVar(value="Classic WalkSAT")
+        self.walksat_adaptive_noise = tk.BooleanVar(value=False)
+        self.walksat_random_seed = tk.StringVar(value="")
 
-        left = ttk.Frame(self.solve_tab)
-        right = ttk.Frame(self.solve_tab)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 10))
-        right.grid(row=0, column=1, sticky="nsew")
-        right.rowconfigure(1, weight=1)
-        right.columnconfigure(0, weight=1)
+        toolbar = self._build_top_toolbar(self.solve_tab)
+        toolbar.grid(row=0, column=0, sticky="ew")
+        self.generate_button = self._toolbar_button(
+            toolbar,
+            "+ Generate CNF",
+            self.generate_cnf,
+            style="Generate.TButton",
+        )
+        self.solve_button = self._toolbar_button(
+            toolbar,
+            "> Solve",
+            self.solve_current,
+            style="Primary.TButton",
+        )
+        self.solve_toolbar_cancel_button = self._toolbar_button(
+            toolbar,
+            "x Cancel",
+            self.cancel_selected_solve_job,
+            style="Danger.TButton",
+            state=tk.DISABLED,
+        )
+        self.save_cnf_button = self._toolbar_button(
+            toolbar,
+            "Save CNF",
+            self.save_cnf_dialog,
+            style="Export.TButton",
+        )
+        self.load_dimacs_button = self._toolbar_button(
+            toolbar,
+            "Load DIMACS",
+            self.load_dimacs_dialog,
+            style="Export.TButton",
+        )
+        self.generate_button.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.solve_button.grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self.solve_toolbar_cancel_button.grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(toolbar, text="Solver").grid(row=0, column=3, sticky="w")
+        ttk.Combobox(
+            toolbar,
+            textvariable=self.solver_name,
+            values=SOLVERS,
+            state="readonly",
+            width=12,
+        ).grid(row=0, column=4, sticky="w", padx=(6, 12))
+        ttk.Label(toolbar, text="Timeout").grid(row=0, column=5, sticky="w")
+        ttk.Entry(toolbar, textvariable=self.solve_timeout_seconds, width=7).grid(row=0, column=6, sticky="w", padx=(6, 12))
+        self.save_cnf_button.grid(row=0, column=7, sticky="w", padx=(0, 6))
+        self.load_dimacs_button.grid(row=0, column=8, sticky="w")
+
+        workspace = ttk.PanedWindow(self.solve_tab, orient=tk.HORIZONTAL)
+        workspace.grid(row=1, column=0, sticky="nsew")
+        self.solve_workspace = workspace
+
+        left_shell = ttk.Frame(workspace)
+        center = ttk.Frame(workspace)
+        detail_shell = ttk.Frame(workspace)
+        workspace.add(left_shell, weight=0)
+        workspace.add(center, weight=1)
+        workspace.add(detail_shell, weight=0)
+
+        left = self._build_scrollable_panel(left_shell)
+        self.solve_tab._tab_scroll_canvas = left_shell._tab_scroll_canvas
+        center.rowconfigure(0, weight=1)
+        center.columnconfigure(0, weight=1)
 
         controls = ttk.LabelFrame(left, text="Problem", padding=8)
         controls.pack(fill=tk.X)
 
-        self.problem_kind = tk.StringVar(value="Sudoku")
         ttk.Label(controls, text="Type").grid(row=0, column=0, sticky="w")
         problem_box = ttk.Combobox(
             controls,
@@ -889,48 +1027,17 @@ class SATApp:
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        self.solver_name = tk.StringVar(value="CDCL")
-        ttk.Label(controls, text="Solver").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(
-            controls,
-            textvariable=self.solver_name,
-            values=SOLVERS,
-            state="readonly",
-            width=24,
-        ).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        self.solve_solver_guide = self._build_solver_guide(controls, row=3, wraplength=230)
+        self.solve_solver_guide = self._build_solver_guide(controls, row=2, wraplength=230)
+        self._build_solve_jobs_panel(controls, row=3)
 
-        self.solve_timeout_seconds = tk.StringVar(value="30")
-        ttk.Label(controls, text="Timeout (s)").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(
-            controls,
-            textvariable=self.solve_timeout_seconds,
-            width=24,
-        ).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-
-        self._build_solve_action_buttons(controls, row=5)
-        self._build_solve_jobs_panel(controls, row=6)
-
-        self.advanced_solver_logs = tk.BooleanVar(value=False)
-        self.solver_log_level = tk.StringVar(value="Periodic progress")
-        self.cdcl_branching = tk.StringVar(value="VSIDS")
-        self.cdcl_initial_phase = tk.StringVar(value="Positive first")
-        self.cdcl_restarts = tk.BooleanVar(value=False)
-        self.cdcl_restart_interval = tk.StringVar(value="100")
-        self.cdcl_learned_clause_limit = tk.StringVar(value="")
-        self.cdcl_random_seed = tk.StringVar(value="")
-        self.walksat_max_tries = tk.StringVar(value="10")
-        self.walksat_max_flips = tk.StringVar(value="10000")
-        self.walksat_noise = tk.StringVar(value="0.5")
-        self.walksat_random_seed = tk.StringVar(value="")
         ttk.Checkbutton(
             controls,
             text="Advanced solver logs",
             variable=self.advanced_solver_logs,
             command=self._refresh_solver_log_controls,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.solver_log_label = ttk.Label(controls, text="Log detail")
-        self.solver_log_label.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        self.solver_log_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
         self.solver_log_box = ttk.Combobox(
             controls,
             textvariable=self.solver_log_level,
@@ -938,10 +1045,10 @@ class SATApp:
             state=tk.DISABLED,
             width=24,
         )
-        self.solver_log_box.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.solver_log_box.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         self.solve_cdcl_options_frame = self._build_cdcl_option_group(
             controls,
-            9,
+            6,
             self.cdcl_branching,
             self.cdcl_initial_phase,
             self.cdcl_restarts,
@@ -952,10 +1059,12 @@ class SATApp:
         )
         self.solve_walksat_options_frame = self._build_walksat_option_group(
             controls,
-            10,
+            7,
             self.walksat_max_tries,
             self.walksat_max_flips,
             self.walksat_noise,
+            self.walksat_selection_mode,
+            self.walksat_adaptive_noise,
             self.walksat_random_seed,
             width=24,
         )
@@ -963,21 +1072,30 @@ class SATApp:
         self.problem_form = ttk.LabelFrame(left, text="Input", padding=8)
         self.problem_form.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        ttk.Label(right, text="CNF Preview").grid(row=0, column=0, sticky="w")
-        self.cnf_text = tk.Text(right, height=22, wrap="none")
-        self.cnf_text.grid(row=1, column=0, sticky="nsew", pady=(4, 10))
-        yscroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.cnf_text.yview)
-        yscroll.grid(row=1, column=1, sticky="ns", pady=(4, 10))
+        center_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
+        center_pane.grid(row=0, column=0, sticky="nsew")
+        cnf_frame = ttk.LabelFrame(center_pane, text="CNF Preview", padding=6)
+        result_frame = ttk.LabelFrame(center_pane, text="Result", padding=6)
+        center_pane.add(cnf_frame, weight=2)
+        center_pane.add(result_frame, weight=1)
+        cnf_frame.rowconfigure(0, weight=1)
+        cnf_frame.columnconfigure(0, weight=1)
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+
+        self.cnf_text = tk.Text(cnf_frame, height=22, wrap="none")
+        self.cnf_text.grid(row=0, column=0, sticky="nsew")
+        yscroll = ttk.Scrollbar(cnf_frame, orient=tk.VERTICAL, command=self.cnf_text.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
         self.cnf_text.configure(yscrollcommand=yscroll.set)
 
-        ttk.Label(right, text="Result").grid(row=2, column=0, sticky="w")
-        self.result_text = tk.Text(right, height=13, wrap="word")
-        self.result_text.grid(row=3, column=0, sticky="nsew", pady=(4, 0))
-        result_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.result_text.yview)
-        result_scroll.grid(row=3, column=1, sticky="ns", pady=(4, 0))
+        self.result_text = tk.Text(result_frame, height=13, wrap="word")
+        self.result_text.grid(row=0, column=0, sticky="nsew")
+        result_scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_text.yview)
+        result_scroll.grid(row=0, column=1, sticky="ns")
         self.result_text.configure(yscrollcommand=result_scroll.set)
 
-        self._build_solve_detail_panel()
+        self._build_solve_detail_panel(detail_shell)
 
         self._refresh_problem_form()
         self._refresh_solver_log_controls()
@@ -1080,9 +1198,12 @@ class SATApp:
         table.bind("<<TreeviewSelect>>", select_callback)
         return table
 
-    def _build_solve_detail_panel(self) -> None:
-        self.solve_detail_frame = ttk.LabelFrame(self.solve_tab, text="Problem Info", padding=8)
-        self.solve_detail_frame.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+    def _build_solve_detail_panel(self, parent=None) -> None:
+        parent = parent or self.solve_tab
+        parent.rowconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=1)
+        self.solve_detail_frame = ttk.LabelFrame(parent, text="Problem Info", padding=8)
+        self.solve_detail_frame.grid(row=0, column=0, sticky="nsew")
         self.solve_detail_frame.columnconfigure(0, weight=1)
         self.solve_detail_frame.rowconfigure(0, weight=1)
         self.solve_detail_frame.rowconfigure(1, weight=2)
@@ -1121,13 +1242,24 @@ class SATApp:
         self.solve_detail_notebook.add(visual_frame, text="Graph")
         self.solve_visual_status = tk.StringVar(value="Generate or solve a graph problem to preview it.")
         ttk.Label(visual_frame, textvariable=self.solve_visual_status, wraplength=360).grid(row=0, column=0, sticky="ew")
+        graph_buttons = ttk.Frame(visual_frame)
+        graph_buttons.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        graph_buttons.columnconfigure(0, weight=1)
+        graph_buttons.columnconfigure(1, weight=1)
         self.refresh_solve_graph_button = ttk.Button(
-            visual_frame,
-            text="Refresh graph",
+            graph_buttons,
+            text="@ Refresh graph",
             command=lambda: self.render_solve_graph(force=True),
             state=tk.DISABLED,
         )
-        self.refresh_solve_graph_button.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        self.refresh_solve_graph_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.open_solve_graph_button = ttk.Button(
+            graph_buttons,
+            text="Open Graph",
+            command=self.open_solve_graph_window,
+            state=tk.DISABLED,
+        )
+        self.open_solve_graph_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.solve_visual_frame = ttk.Frame(visual_frame)
         self.solve_visual_frame.grid(row=2, column=0, sticky="nsew")
         self.solve_visual_frame.rowconfigure(0, weight=1)
@@ -1214,6 +1346,8 @@ class SATApp:
         max_tries_var,
         max_flips_var,
         noise_var,
+        selection_mode_var,
+        adaptive_noise_var,
         random_seed_var,
         width: int,
     ) -> None:
@@ -1226,8 +1360,37 @@ class SATApp:
         ttk.Label(parent, text="Noise").grid(row=start_row + 2, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(parent, textvariable=noise_var, width=width).grid(row=start_row + 2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(parent, text="Random seed").grid(row=start_row + 3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(parent, text="Strategy").grid(row=start_row + 3, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            parent,
+            textvariable=selection_mode_var,
+            values=WALKSAT_STRATEGIES,
+            state="readonly",
+            width=width,
+        ).grid(row=start_row + 3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        ttk.Checkbutton(parent, text="Adaptive noise", variable=adaptive_noise_var).grid(
+            row=start_row + 4,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        ttk.Label(parent, text="Random seed").grid(row=start_row + 5, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        help_text = (
+            "Classic mixes random and greedy flips. ProbSAT favors low-break, "
+            "high-make flips. Adaptive noise increases randomness after stagnation."
+        )
+        ttk.Label(parent, text=help_text, wraplength=260, justify="left").grid(
+            row=start_row + 6,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(8, 0),
+        )
 
     def _build_walksat_option_group(
         self,
@@ -1236,6 +1399,8 @@ class SATApp:
         max_tries_var,
         max_flips_var,
         noise_var,
+        selection_mode_var,
+        adaptive_noise_var,
         random_seed_var,
         width: int,
     ):
@@ -1248,6 +1413,8 @@ class SATApp:
             max_tries_var,
             max_flips_var,
             noise_var,
+            selection_mode_var,
+            adaptive_noise_var,
             random_seed_var,
             width,
         )
@@ -1333,7 +1500,10 @@ class SATApp:
         self._build_sudoku_grid()
 
     def _update_sudoku_scroll_region(self, _event=None) -> None:
-        self.sudoku_canvas.configure(scrollregion=self.sudoku_canvas.bbox("all"))
+        try:
+            self.sudoku_canvas.configure(scrollregion=self.sudoku_canvas.bbox("all"))
+        except tk.TclError:
+            return
 
     def _on_sudoku_mousewheel(self, event) -> str:
         if event.state & 0x0001:
@@ -1362,7 +1532,7 @@ class SATApp:
 
         self.sudoku_canvas.xview_moveto(0)
         self.sudoku_canvas.yview_moveto(0)
-        self.sudoku_canvas.after_idle(self._update_sudoku_scroll_region)
+        self._update_sudoku_scroll_region()
 
     def _build_n_queens_form(self) -> None:
         fields = ttk.Frame(self.problem_form)
@@ -1680,6 +1850,8 @@ class SATApp:
             self.walksat_max_tries.get(),
             self.walksat_max_flips.get(),
             self.walksat_noise.get(),
+            self.walksat_selection_mode.get(),
+            self.walksat_adaptive_noise.get(),
             self.walksat_random_seed.get(),
         )
 
@@ -1696,6 +1868,8 @@ class SATApp:
             self.bench_walksat_max_tries.get(),
             self.bench_walksat_max_flips.get(),
             self.bench_walksat_noise.get(),
+            self.bench_walksat_selection_mode.get(),
+            self.bench_walksat_adaptive_noise.get(),
             self.bench_walksat_random_seed.get(),
         )
 
@@ -1712,6 +1886,8 @@ class SATApp:
         walksat_max_tries: str = "10",
         walksat_max_flips: str = "10000",
         walksat_noise: str = "0.5",
+        walksat_selection_mode: str = "Classic WalkSAT",
+        walksat_adaptive_noise: bool = False,
         walksat_random_seed: str = "",
     ) -> dict:
         if not enabled:
@@ -1730,8 +1906,13 @@ class SATApp:
         options["walksat_max_tries"] = self._positive_int_text(walksat_max_tries)
         options["walksat_max_flips"] = self._positive_int_text(walksat_max_flips)
         options["walksat_noise"] = self._probability_text(walksat_noise)
+        options["walksat_selection_mode"] = self._walksat_selection_mode_key(walksat_selection_mode)
+        options["walksat_adaptive_noise"] = bool(walksat_adaptive_noise)
         options["walksat_random_seed"] = self._optional_int_text(walksat_random_seed)
         return options
+
+    def _walksat_selection_mode_key(self, text: str) -> str:
+        return "probsat" if str(text).strip().lower() == "probsat" else "walksat"
 
     def _optional_int_text(self, text: str) -> int | None:
         raw = str(text).strip()
@@ -1848,6 +2029,7 @@ class SATApp:
             self._write_text_widget(self.solve_input_text, "Generate or solve a problem to see problem-specific input data.")
             self._clear_solve_graph_preview("Generate or solve a graph problem to preview it.")
             self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            self.open_solve_graph_button.configure(state=tk.DISABLED)
             return
 
         self._write_text_widget(self.solve_detail_text, self._format_benchmark_row_details(row))
@@ -1857,22 +2039,27 @@ class SATApp:
         if not self._is_graph_benchmark_row(row):
             self._clear_solve_graph_preview(f"{row.problem_type} rows show their data in the Input tab.")
             self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            self.open_solve_graph_button.configure(state=tk.DISABLED)
             return
 
         if not row.graph_edges and row.node_count == "-":
             self._clear_solve_graph_preview("No graph data stored for this problem.")
             self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            self.open_solve_graph_button.configure(state=tk.DISABLED)
             return
 
         policy = self._graph_preview_policy(row.node_count, len(row.graph_edges))
         if policy == "auto":
             self.refresh_solve_graph_button.configure(state=tk.NORMAL)
+            self.open_solve_graph_button.configure(state=tk.NORMAL)
             self.render_solve_graph(force=False)
         elif policy == "manual":
             self.refresh_solve_graph_button.configure(state=tk.NORMAL)
+            self.open_solve_graph_button.configure(state=tk.NORMAL)
             self._clear_solve_graph_preview("Graph is moderately large; use Refresh graph when needed.")
         else:
             self.refresh_solve_graph_button.configure(state=tk.DISABLED)
+            self.open_solve_graph_button.configure(state=tk.DISABLED)
             self._clear_solve_graph_preview("Graph too large to preview safely.")
 
     def copy_solve_data(self) -> None:
@@ -1899,7 +2086,17 @@ class SATApp:
             f"Variables: {result.variables}",
         ]
 
-        for key in ("decisions", "conflicts", "propagations", "learned_clauses", "tries", "flips", "best_unsatisfied"):
+        for key in (
+            "decisions",
+            "conflicts",
+            "propagations",
+            "learned_clauses",
+            "tries",
+            "flips",
+            "best_unsatisfied",
+            "termination_reason",
+            "final_noise",
+        ):
             if key in result.stats:
                 lines.append(f"{key.replace('_', ' ').title()}: {result.stats[key]}")
 
@@ -2056,14 +2253,6 @@ class SATApp:
         dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
 
     def _build_benchmark_tab(self) -> None:
-        self.benchmark_tab.columnconfigure(1, weight=1)
-        self.benchmark_tab.columnconfigure(2, weight=0, minsize=340)
-        self.benchmark_tab.rowconfigure(1, weight=1)
-
-        self.benchmark_controls = ttk.LabelFrame(self.benchmark_tab, text="Benchmark", padding=8)
-        self.benchmark_controls.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 10))
-        self.benchmark_controls.columnconfigure(1, weight=1)
-
         self.bench_problem = tk.StringVar(value="Graph Coloring")
         self.bench_nodes = tk.StringVar(value="10,20,30")
         self.bench_generation_mode = tk.StringVar(value="Probability")
@@ -2094,6 +2283,8 @@ class SATApp:
         self.bench_walksat_max_tries = tk.StringVar(value="10")
         self.bench_walksat_max_flips = tk.StringVar(value="10000")
         self.bench_walksat_noise = tk.StringVar(value="0.5")
+        self.bench_walksat_selection_mode = tk.StringVar(value="Classic WalkSAT")
+        self.bench_walksat_adaptive_noise = tk.BooleanVar(value=False)
         self.bench_walksat_random_seed = tk.StringVar(value="")
         self.bench_suite_graph_coloring = tk.BooleanVar(value=False)
         self.bench_suite_hamiltonian = tk.BooleanVar(value=False)
@@ -2105,6 +2296,91 @@ class SATApp:
         }
         self.chart_metric = tk.StringVar(value="Raw Time")
         self.chart_view = tk.StringVar(value="Raw runs")
+
+        toolbar = self._build_top_toolbar(self.benchmark_tab)
+        toolbar.grid(row=0, column=0, sticky="ew")
+        self.run_benchmark_button = self._toolbar_button(
+            toolbar,
+            "> Run Benchmark",
+            self.run_benchmark,
+            style="Primary.TButton",
+        )
+        self.benchmark_toolbar_cancel_button = self._toolbar_button(
+            toolbar,
+            "x Cancel Selected",
+            self.cancel_selected_benchmark_job,
+            style="Danger.TButton",
+            state=tk.DISABLED,
+        )
+        self.skip_benchmark_button = self._toolbar_button(
+            toolbar,
+            "Skip Case",
+            self.skip_current_benchmark_case,
+            style="Warning.TButton",
+            state=tk.DISABLED,
+        )
+        self.export_csv_button = self._toolbar_button(
+            toolbar,
+            "Export CSV",
+            self.export_benchmark_csv,
+            style="Export.TButton",
+        )
+        self.export_chart_button = self._toolbar_button(
+            toolbar,
+            "Export Chart",
+            self.export_benchmark_chart,
+            style="Export.TButton",
+        )
+        self.clear_benchmark_table_button = self._toolbar_button(
+            toolbar,
+            "Clear Table",
+            self.clear_benchmark_table,
+            style="Danger.TButton",
+            state=tk.DISABLED,
+        )
+        self.run_benchmark_button.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.benchmark_toolbar_cancel_button.grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self.skip_benchmark_button.grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Label(toolbar, text="Metric").grid(row=0, column=3, sticky="w")
+        self.chart_metric_box = ttk.Combobox(
+            toolbar,
+            textvariable=self.chart_metric,
+            values=("Raw Time", "Log Time", "Normalized Time", "Conflicts", "Decisions"),
+            state="readonly",
+            width=16,
+        )
+        self.chart_metric_box.grid(row=0, column=4, sticky="w", padx=(6, 12))
+        ttk.Label(toolbar, text="View").grid(row=0, column=5, sticky="w")
+        self.chart_view_box = ttk.Combobox(
+            toolbar,
+            textvariable=self.chart_view,
+            values=("Raw runs", "Average repeats"),
+            state="readonly",
+            width=14,
+        )
+        self.chart_view_box.grid(row=0, column=6, sticky="w", padx=(6, 12))
+        self.refresh_chart_button = self._toolbar_button(toolbar, "@ Refresh Chart", self.draw_benchmark_chart)
+        self.refresh_chart_button.grid(row=0, column=7, sticky="w", padx=(0, 6))
+        self.export_csv_button.grid(row=0, column=8, sticky="w", padx=(0, 6))
+        self.export_chart_button.grid(row=0, column=9, sticky="w", padx=(0, 6))
+        self.clear_benchmark_table_button.grid(row=0, column=10, sticky="w")
+
+        workspace = ttk.PanedWindow(self.benchmark_tab, orient=tk.HORIZONTAL)
+        workspace.grid(row=1, column=0, sticky="nsew")
+        self.benchmark_workspace = workspace
+
+        left_shell = ttk.Frame(workspace)
+        center = ttk.Frame(workspace)
+        detail_shell = ttk.Frame(workspace)
+        workspace.add(left_shell, weight=0)
+        workspace.add(center, weight=1)
+        workspace.add(detail_shell, weight=0)
+        left = self._build_scrollable_panel(left_shell)
+        self.benchmark_tab._tab_scroll_canvas = left_shell._tab_scroll_canvas
+
+        self.benchmark_controls = ttk.LabelFrame(left, text="Benchmark", padding=8)
+        self.benchmark_controls.pack(fill=tk.X)
+        self.benchmark_controls.columnconfigure(1, weight=1)
 
         ttk.Label(self.benchmark_controls, text="Problem").grid(row=0, column=0, sticky="w")
         problem_box = ttk.Combobox(
@@ -2134,11 +2410,10 @@ class SATApp:
         ttk.Label(self.benchmark_controls, text="Timeout (s)").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(self.benchmark_controls, textvariable=self.bench_timeout_seconds, width=18).grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        self._build_benchmark_action_buttons(row=5)
-        self._build_benchmark_jobs_panel(row=6)
+        self._build_benchmark_jobs_panel(row=5)
 
         solver_frame = ttk.LabelFrame(self.benchmark_controls, text="Solvers", padding=6)
-        solver_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        solver_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         solver_frame.columnconfigure(0, weight=1)
         solver_frame.columnconfigure(1, weight=1)
         solver_frame.columnconfigure(2, weight=1)
@@ -2153,9 +2428,9 @@ class SATApp:
             text="Advanced solver logs",
             variable=self.bench_advanced_solver_logs,
             command=self._refresh_benchmark_log_controls,
-        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.bench_log_label = ttk.Label(self.benchmark_controls, text="Log detail")
-        self.bench_log_label.grid(row=9, column=0, sticky="w", pady=(8, 0))
+        self.bench_log_label.grid(row=8, column=0, sticky="w", pady=(8, 0))
         self.bench_log_box = ttk.Combobox(
             self.benchmark_controls,
             textvariable=self.bench_solver_log_level,
@@ -2163,10 +2438,10 @@ class SATApp:
             state=tk.DISABLED,
             width=16,
         )
-        self.bench_log_box.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.bench_log_box.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         self.benchmark_cdcl_options_frame = self._build_cdcl_option_group(
             self.benchmark_controls,
-            10,
+            9,
             self.bench_cdcl_branching,
             self.bench_cdcl_initial_phase,
             self.bench_cdcl_restarts,
@@ -2177,34 +2452,22 @@ class SATApp:
         )
         self.benchmark_walksat_options_frame = self._build_walksat_option_group(
             self.benchmark_controls,
-            11,
+            10,
             self.bench_walksat_max_tries,
             self.bench_walksat_max_flips,
             self.bench_walksat_noise,
+            self.bench_walksat_selection_mode,
+            self.bench_walksat_adaptive_noise,
             self.bench_walksat_random_seed,
             width=16,
         )
 
-        ttk.Label(self.benchmark_controls, text="Metric").grid(row=12, column=0, sticky="w", pady=(12, 0))
-        ttk.Combobox(
-            self.benchmark_controls,
-            textvariable=self.chart_metric,
-            values=("Raw Time", "Log Time", "Normalized Time", "Conflicts", "Decisions"),
-            state="readonly",
-            width=16,
-        ).grid(row=12, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
-        ttk.Label(self.benchmark_controls, text="View").grid(row=13, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(
-            self.benchmark_controls,
-            textvariable=self.chart_view,
-            values=("Raw runs", "Average repeats"),
-            state="readonly",
-            width=16,
-        ).grid(row=13, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Button(self.benchmark_controls, text="Refresh Chart", command=self.draw_benchmark_chart).grid(row=14, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        center.rowconfigure(0, weight=1)
+        center.columnconfigure(0, weight=1)
+        center_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
+        center_pane.grid(row=0, column=0, sticky="nsew")
 
-        table_frame = ttk.Frame(self.benchmark_tab)
-        table_frame.grid(row=0, column=1, sticky="nsew")
+        table_frame = ttk.LabelFrame(center_pane, text="Runs", padding=6)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
@@ -2245,12 +2508,13 @@ class SATApp:
         table_xscroll.grid(row=1, column=0, sticky="ew")
         self.benchmark_table.configure(yscrollcommand=table_scroll.set, xscrollcommand=table_xscroll.set)
 
-        self.chart_frame = ttk.LabelFrame(self.benchmark_tab, text="Chart", padding=8)
-        self.chart_frame.grid(row=1, column=1, sticky="nsew", pady=(10, 0))
+        self.chart_frame = ttk.LabelFrame(center_pane, text="Chart", padding=8)
         self.chart_frame.rowconfigure(0, weight=1)
         self.chart_frame.columnconfigure(0, weight=1)
+        center_pane.add(table_frame, weight=2)
+        center_pane.add(self.chart_frame, weight=1)
 
-        self._build_benchmark_detail_panel()
+        self._build_benchmark_detail_panel(detail_shell)
 
         self._refresh_benchmark_form()
         self._refresh_benchmark_log_controls()
@@ -2378,9 +2642,12 @@ class SATApp:
         self.benchmark_status = tk.StringVar(value="Showing all benchmark rows.")
         ttk.Label(panel, textvariable=self.benchmark_status, wraplength=230).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-    def _build_benchmark_detail_panel(self) -> None:
-        self.benchmark_detail_frame = ttk.LabelFrame(self.benchmark_tab, text="Selected Case", padding=8)
-        self.benchmark_detail_frame.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(10, 0))
+    def _build_benchmark_detail_panel(self, parent=None) -> None:
+        parent = parent or self.benchmark_tab
+        parent.rowconfigure(0, weight=1)
+        parent.columnconfigure(0, weight=1)
+        self.benchmark_detail_frame = ttk.LabelFrame(parent, text="Selected Case", padding=8)
+        self.benchmark_detail_frame.grid(row=0, column=0, sticky="nsew")
         self.benchmark_detail_frame.columnconfigure(0, weight=1)
         self.benchmark_detail_frame.rowconfigure(0, weight=1)
         self.benchmark_detail_frame.rowconfigure(1, weight=2)
@@ -2429,13 +2696,24 @@ class SATApp:
         self.benchmark_detail_notebook.add(preview_frame, text="Graph")
         self.graph_preview_status = tk.StringVar(value="Select a graph benchmark row to preview it.")
         ttk.Label(preview_frame, textvariable=self.graph_preview_status, wraplength=300).grid(row=0, column=0, sticky="ew")
+        graph_buttons = ttk.Frame(preview_frame)
+        graph_buttons.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        graph_buttons.columnconfigure(0, weight=1)
+        graph_buttons.columnconfigure(1, weight=1)
         self.render_graph_button = ttk.Button(
-            preview_frame,
-            text="Refresh graph",
+            graph_buttons,
+            text="@ Refresh graph",
             command=lambda: self.render_selected_benchmark_graph(force=True),
             state=tk.DISABLED,
         )
-        self.render_graph_button.grid(row=1, column=0, sticky="ew", pady=(4, 6))
+        self.render_graph_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.open_benchmark_graph_button = ttk.Button(
+            graph_buttons,
+            text="Open Graph",
+            command=self.open_benchmark_graph_window,
+            state=tk.DISABLED,
+        )
+        self.open_benchmark_graph_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.graph_preview_frame = ttk.Frame(preview_frame)
         self.graph_preview_frame.grid(row=2, column=0, sticky="nsew")
         self.graph_preview_frame.rowconfigure(0, weight=1)
@@ -2921,6 +3199,8 @@ class SATApp:
             self._write_text_widget(self.benchmark_detail_text, "Select a benchmark row to see its stats and response.")
             self._write_text_widget(self.benchmark_edge_text, "Select a benchmark row to see problem-specific input data.")
             self._clear_benchmark_graph_preview("Select a graph benchmark row to preview it.")
+            self.render_graph_button.configure(state=tk.DISABLED)
+            self.open_benchmark_graph_button.configure(state=tk.DISABLED)
 
     def _insert_benchmark_row(self, row: BenchmarkRow) -> None:
         item = self.benchmark_table.insert(
@@ -2961,22 +3241,27 @@ class SATApp:
         if not self._is_graph_benchmark_row(row):
             self._clear_benchmark_graph_preview(f"{row.problem_type} rows show their data in the Input tab.")
             self.render_graph_button.configure(state=tk.DISABLED)
+            self.open_benchmark_graph_button.configure(state=tk.DISABLED)
             return
 
         if not row.graph_edges and row.node_count == "-":
             self._clear_benchmark_graph_preview("No graph data stored for this benchmark row.")
             self.render_graph_button.configure(state=tk.DISABLED)
+            self.open_benchmark_graph_button.configure(state=tk.DISABLED)
             return
 
         policy = self._graph_preview_policy(row.node_count, len(row.graph_edges))
         if policy == "auto":
             self.render_graph_button.configure(state=tk.NORMAL)
+            self.open_benchmark_graph_button.configure(state=tk.NORMAL)
             self.render_selected_benchmark_graph(force=False)
         elif policy == "manual":
             self.render_graph_button.configure(state=tk.NORMAL)
+            self.open_benchmark_graph_button.configure(state=tk.NORMAL)
             self._clear_benchmark_graph_preview("Graph is moderately large; use Refresh graph when needed.")
         else:
             self.render_graph_button.configure(state=tk.DISABLED)
+            self.open_benchmark_graph_button.configure(state=tk.DISABLED)
             self._clear_benchmark_graph_preview("Graph too large to preview safely.")
 
     def _format_benchmark_row_details(self, row: BenchmarkRow) -> str:
@@ -3246,27 +3531,12 @@ class SATApp:
             child.destroy()
         self.solve_visual_status.set(message)
 
-    def render_selected_benchmark_graph(self, force: bool = False) -> None:
-        row = self.selected_benchmark_row
-        if row is None:
-            return
-
-        if Figure is None or FigureCanvasTkAgg is None:
-            self._clear_benchmark_graph_preview("Matplotlib Tk support is not available.")
-            return
-
+    def _build_graph_figure(self, row: BenchmarkRow, figsize=(4.4, 2.6), show_labels: bool = True, node_size_override=None):
         nodes = self._safe_int(row.node_count)
         if nodes is None or nodes <= 0:
-            self._clear_benchmark_graph_preview("No graph node data stored for this benchmark row.")
-            return
+            raise ValueError("No graph node data is available.")
 
-        policy = self._graph_preview_policy(nodes, len(row.graph_edges))
-        if policy == "skip" and not force:
-            self._clear_benchmark_graph_preview("Graph too large to preview safely.")
-            return
-
-        self._clear_benchmark_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
-        figure = Figure(figsize=(3.6, 2.3), dpi=100)
+        figure = Figure(figsize=figsize, dpi=100)
         axis = figure.add_subplot(111)
         positions = self._circular_graph_positions(nodes)
         edges = sorted((int(u), int(v)) for u, v in row.graph_edges)
@@ -3293,7 +3563,7 @@ class SATApp:
                 )
 
         node_colors = [self._benchmark_node_color(row, node) for node in range(1, nodes + 1)]
-        node_size = 52 if nodes <= 80 else 20
+        node_size = node_size_override if node_size_override is not None else (52 if nodes <= 80 else 20)
         axis.scatter(
             [positions[node][0] for node in range(1, nodes + 1)],
             [positions[node][1] for node in range(1, nodes + 1)],
@@ -3304,7 +3574,7 @@ class SATApp:
             zorder=3,
         )
 
-        if nodes <= 80:
+        if show_labels and nodes <= 80:
             labels = self._benchmark_node_labels(row, nodes)
             for node in range(1, nodes + 1):
                 axis.text(
@@ -3320,11 +3590,34 @@ class SATApp:
         axis.set_aspect("equal")
         axis.axis("off")
         figure.tight_layout()
+        return figure, nodes, len(edges)
+
+    def render_selected_benchmark_graph(self, force: bool = False) -> None:
+        row = self.selected_benchmark_row
+        if row is None:
+            return
+
+        if Figure is None or FigureCanvasTkAgg is None:
+            self._clear_benchmark_graph_preview("Matplotlib Tk support is not available.")
+            return
+
+        nodes = self._safe_int(row.node_count)
+        if nodes is None or nodes <= 0:
+            self._clear_benchmark_graph_preview("No graph node data stored for this benchmark row.")
+            return
+
+        policy = self._graph_preview_policy(nodes, len(row.graph_edges))
+        if policy == "skip" and not force:
+            self._clear_benchmark_graph_preview("Graph too large to preview safely.")
+            return
+
+        self._clear_benchmark_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
+        figure, nodes, edge_count = self._build_graph_figure(row, figsize=(3.6, 2.3))
 
         self.benchmark_detail_canvas = FigureCanvasTkAgg(figure, master=self.graph_preview_frame)
         self.benchmark_detail_canvas.draw()
         self.benchmark_detail_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-        self.graph_preview_status.set(f"Preview: {nodes} nodes, {len(edges)} edges.")
+        self.graph_preview_status.set(f"Preview: {nodes} nodes, {edge_count} edges.")
 
     def render_solve_graph(self, force: bool = False) -> None:
         row = self._solve_detail_row()
@@ -3346,64 +3639,146 @@ class SATApp:
             return
 
         self._clear_solve_graph_preview(f"Rendering {nodes} nodes and {len(row.graph_edges)} edges.")
-        figure = Figure(figsize=(4.4, 2.6), dpi=100)
-        axis = figure.add_subplot(111)
-        positions = self._circular_graph_positions(nodes)
-        edges = sorted((int(u), int(v)) for u, v in row.graph_edges)
-
-        for u, v in edges:
-            if u in positions and v in positions:
-                axis.plot(
-                    [positions[u][0], positions[v][0]],
-                    [positions[u][1], positions[v][1]],
-                    color="#c9c9c9",
-                    linewidth=0.7,
-                    zorder=1,
-                )
-
-        for u, v in self._benchmark_path_edges(row):
-            if u in positions and v in positions:
-                axis.plot(
-                    [positions[u][0], positions[v][0]],
-                    [positions[u][1], positions[v][1]],
-                    color="#222222",
-                    linewidth=2.0,
-                    zorder=2,
-                )
-
-        node_colors = [self._benchmark_node_color(row, node) for node in range(1, nodes + 1)]
-        node_size = 52 if nodes <= 80 else 20
-        axis.scatter(
-            [positions[node][0] for node in range(1, nodes + 1)],
-            [positions[node][1] for node in range(1, nodes + 1)],
-            c=node_colors,
-            s=node_size,
-            edgecolors="#333333",
-            linewidths=0.4,
-            zorder=3,
-        )
-
-        if nodes <= 80:
-            labels = self._benchmark_node_labels(row, nodes)
-            for node in range(1, nodes + 1):
-                axis.text(
-                    positions[node][0],
-                    positions[node][1],
-                    labels.get(node, str(node)),
-                    ha="center",
-                    va="center",
-                    fontsize=6,
-                    zorder=4,
-                )
-
-        axis.set_aspect("equal")
-        axis.axis("off")
-        figure.tight_layout()
+        figure, nodes, edge_count = self._build_graph_figure(row, figsize=(4.4, 2.6))
 
         self.solve_detail_canvas = FigureCanvasTkAgg(figure, master=self.solve_visual_frame)
         self.solve_detail_canvas.draw()
         self.solve_detail_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-        self.solve_visual_status.set(f"Preview: {nodes} nodes, {len(edges)} edges.")
+        self.solve_visual_status.set(f"Preview: {nodes} nodes, {edge_count} edges.")
+
+    def open_solve_graph_window(self) -> None:
+        row = self._solve_detail_row()
+        if row is None:
+            messagebox.showinfo("No graph", "Generate or solve a graph problem first.")
+            return
+        self._open_graph_popout(row, "Solve Graph")
+
+    def open_benchmark_graph_window(self) -> None:
+        row = self.selected_benchmark_row
+        if row is None:
+            messagebox.showinfo("No graph", "Select a graph benchmark row first.")
+            return
+        self._open_graph_popout(row, "Benchmark Graph")
+
+    def _open_graph_popout(self, row: BenchmarkRow, title: str) -> None:
+        if not self._is_graph_benchmark_row(row):
+            messagebox.showinfo("No graph", f"{row.problem_type} rows do not have a graph preview.")
+            return
+        if Figure is None or FigureCanvasTkAgg is None:
+            messagebox.showwarning("Graph unavailable", "Matplotlib Tk support is not available.")
+            return
+        if self._safe_int(row.node_count) is None:
+            messagebox.showinfo("No graph", "No graph data is stored for this row.")
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("820x620")
+        window.rowconfigure(1, weight=1)
+        window.columnconfigure(0, weight=1)
+
+        toolbar = self._build_top_toolbar(window)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 0))
+        canvas_frame = ttk.Frame(window, padding=8)
+        canvas_frame.grid(row=1, column=0, sticky="nsew")
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
+        status = tk.StringVar(value="")
+        ttk.Label(window, textvariable=status).grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        show_labels = tk.BooleanVar(value=True)
+        node_size_var = tk.StringVar(value="")
+
+        state = {"canvas": None, "figure": None}
+
+        def draw() -> None:
+            if state["canvas"] is not None:
+                state["canvas"].get_tk_widget().destroy()
+            node_size = None
+            raw_size = node_size_var.get().strip()
+            if raw_size:
+                try:
+                    node_size = max(1, int(raw_size))
+                except ValueError:
+                    status.set("Node size must be a positive integer.")
+                    return
+            figure, nodes, edge_count = self._build_graph_figure(
+                row,
+                figsize=(7.2, 5.0),
+                show_labels=show_labels.get(),
+                node_size_override=node_size,
+            )
+            state["figure"] = figure
+            state["canvas"] = FigureCanvasTkAgg(figure, master=canvas_frame)
+            state["canvas"].draw()
+            state["canvas"].get_tk_widget().grid(row=0, column=0, sticky="nsew")
+            status.set(f"{row.case_name}: {nodes} nodes, {edge_count} edges")
+
+        ttk.Button(toolbar, text="@ Refresh", command=draw).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Checkbutton(toolbar, text="Labels", variable=show_labels, command=draw).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        ttk.Label(toolbar, text="Node size").grid(row=0, column=2, sticky="w")
+        ttk.Entry(toolbar, textvariable=node_size_var, width=6).grid(row=0, column=3, sticky="w", padx=(4, 8))
+        ttk.Button(
+            toolbar,
+            text="Export PNG",
+            command=lambda: self._export_graph_png(state["figure"], row),
+            style="Export.TButton",
+        ).grid(row=0, column=4, sticky="w", padx=(0, 6))
+        ttk.Button(
+            toolbar,
+            text="Copy Graph Data",
+            command=lambda: self._copy_graph_data(row),
+        ).grid(row=0, column=5, sticky="w", padx=(0, 6))
+        ttk.Button(
+            toolbar,
+            text="Export Graph Data",
+            command=lambda: self._export_graph_data(row),
+            style="Export.TButton",
+        ).grid(row=0, column=6, sticky="w")
+        draw()
+
+    def _format_graph_export_data(self, row: BenchmarkRow) -> str:
+        lines = [
+            row.case_name,
+            f"type={row.problem_type}",
+            f"solver={row.solver}",
+            f"status={row.status}",
+            f"nodes={row.node_count}",
+            f"edges={len(row.graph_edges)}",
+        ]
+        if row.decoded is not None:
+            lines.extend(["", "Decoded:", self._format_decoded(row.decoded)])
+        lines.extend(["", "Edges:", self._format_benchmark_edges(row.graph_edges, row.node_count)])
+        return "\n".join(lines)
+
+    def _copy_graph_data(self, row: BenchmarkRow) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self._format_graph_export_data(row))
+
+    def _export_graph_data(self, row: BenchmarkRow) -> None:
+        safe_name = row.case_name.replace(" ", "_").replace("/", "_")
+        path = filedialog.asksaveasfilename(
+            initialdir=str(BENCHMARK_OUTPUT),
+            initialfile=f"{safe_name}_graph.txt",
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            Path(path).write_text(self._format_graph_export_data(row), encoding="utf-8")
+            messagebox.showinfo("Exported", f"Saved graph data to {path}")
+
+    def _export_graph_png(self, figure, row: BenchmarkRow) -> None:
+        if figure is None:
+            return
+        safe_name = row.case_name.replace(" ", "_").replace("/", "_")
+        path = filedialog.asksaveasfilename(
+            initialdir=str(BENCHMARK_OUTPUT),
+            initialfile=f"{safe_name}_graph.png",
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png"), ("All files", "*.*")],
+        )
+        if path:
+            figure.savefig(path)
+            messagebox.showinfo("Exported", f"Saved graph image to {path}")
 
     def _circular_graph_positions(self, node_count: int) -> dict[int, tuple[float, float]]:
         positions = {}

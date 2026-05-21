@@ -3,6 +3,7 @@ import time
 import tkinter as tk
 import random
 
+import app as app_module
 from app import BENCHMARK_PROBLEMS, PROBLEM_KINDS, SATApp, SUDOKU_SIZES
 from problems.clique import (
     average_degree_clique_problem,
@@ -513,6 +514,8 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(options["walksat_max_tries"], 10)
         self.assertEqual(options["walksat_max_flips"], 10000)
         self.assertEqual(options["walksat_noise"], 0.5)
+        self.assertEqual(options["walksat_selection_mode"], "walksat")
+        self.assertFalse(options["walksat_adaptive_noise"])
         self.assertIsNone(options["walksat_random_seed"])
 
     def test_walksat_option_form_builder(self):
@@ -524,13 +527,41 @@ class AppBackendTests(unittest.TestCase):
             walksat_max_tries="3",
             walksat_max_flips="40",
             walksat_noise="0.25",
+            walksat_selection_mode="ProbSAT",
+            walksat_adaptive_noise=True,
             walksat_random_seed="9",
         )
 
         self.assertEqual(options["walksat_max_tries"], 3)
         self.assertEqual(options["walksat_max_flips"], 40)
         self.assertEqual(options["walksat_noise"], 0.25)
+        self.assertEqual(options["walksat_selection_mode"], "probsat")
+        self.assertTrue(options["walksat_adaptive_noise"])
         self.assertEqual(options["walksat_random_seed"], 9)
+
+    def test_walksat_solve_result_shows_reason_and_final_noise(self):
+        app = SATApp.__new__(SATApp)
+        app.current_problem = ProblemInstance("Tiny", "DIMACS", [[1], [-1]])
+        result = SolveResult(
+            solver="WalkSAT",
+            status="UNKNOWN",
+            elapsed=0.01,
+            solution=None,
+            stats={
+                "tries": 1,
+                "flips": 2,
+                "best_unsatisfied": 1,
+                "termination_reason": "budget_exhausted",
+                "final_noise": 0.55,
+            },
+            clauses=2,
+            variables=1,
+        )
+
+        text = app._format_solve_result(result)
+
+        self.assertIn("Termination Reason: budget_exhausted", text)
+        self.assertIn("Final Noise: 0.55", text)
 
     def test_benchmark_row_records_solver_options(self):
         problem = random_graph_coloring_problem(4, 0.5, 3, seed=3)
@@ -761,9 +792,22 @@ class AppBackendTests(unittest.TestCase):
             self.assertEqual(str(app.benchmark_cdcl_options_frame.cget("text")), "CDCL Options")
             self.assertEqual(str(app.solve_walksat_options_frame.cget("text")), "WalkSAT Options")
             self.assertEqual(str(app.benchmark_walksat_options_frame.cget("text")), "WalkSAT Options")
+            self.assertIn("+ Generate", str(app.generate_button.cget("text")))
+            self.assertIn("> Solve", str(app.solve_button.cget("text")))
+            self.assertIn("x Cancel", str(app.solve_toolbar_cancel_button.cget("text")))
+            self.assertIn("@ Refresh Chart", str(app.refresh_chart_button.cget("text")))
+            self.assertIn("Export CSV", str(app.export_csv_button.cget("text")))
+            self.assertEqual(str(app.chart_metric_box.cget("state")), "readonly")
+            self.assertEqual(str(app.chart_view_box.cget("state")), "readonly")
+            self.assertTrue(app.root.bind("<Control-w>"))
+            self.assertTrue(hasattr(app.solve_tab, "_tab_scroll_canvas"))
+            self.assertTrue(hasattr(app.benchmark_tab, "_tab_scroll_canvas"))
             self.assertEqual(app.walksat_max_tries.get(), "10")
             self.assertEqual(app.walksat_max_flips.get(), "10000")
             self.assertEqual(app.walksat_noise.get(), "0.5")
+            self.assertEqual(app.walksat_selection_mode.get(), "Classic WalkSAT")
+            self.assertFalse(app.walksat_adaptive_noise.get())
+            self.assertIn("ProbSAT", app.solve_solver_guide.guide_text)
             self.assertEqual(str(app.solve_jobs_scrollbar.cget("orient")), "vertical")
             self.assertEqual(str(app.benchmark_jobs_scrollbar.cget("orient")), "vertical")
 
@@ -828,8 +872,10 @@ class AppBackendTests(unittest.TestCase):
             benchmark_job.status = "Running"
             app._update_job_row(benchmark_job)
             self.assertEqual(str(app.skip_benchmark_button.cget("state")), "normal")
+            self.assertEqual(str(app.benchmark_toolbar_cancel_button.cget("state")), "normal")
             app._finish_job(benchmark_job, "Done")
             self.assertEqual(str(app.skip_benchmark_button.cget("state")), "disabled")
+            self.assertEqual(str(app.benchmark_toolbar_cancel_button.cget("state")), "disabled")
             self.assertFalse(app.bench_sudoku_size_vars[16].get())
             self.assertFalse(app.bench_sudoku_size_vars[25].get())
             self.assertEqual(str(app.bench_log_box.cget("state")), "disabled")
@@ -874,6 +920,49 @@ class AppBackendTests(unittest.TestCase):
             app._refresh_benchmark_graph_controls()
             self.assertEqual(str(app.bench_graph_field_entries["colors"].cget("state")), "normal")
         finally:
+            root.destroy()
+
+    def test_graph_popout_creates_window_for_graph_rows_only(self):
+        if app_module.Figure is None or app_module.FigureCanvasTkAgg is None:
+            self.skipTest("Matplotlib Tk support is not available")
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        original_showinfo = app_module.messagebox.showinfo
+        messages = []
+        try:
+            app = SATApp(root)
+            graph_row = BenchmarkRow(
+                "Graph Coloring n3",
+                "Graph Coloring",
+                "CDCL",
+                "SAT",
+                0.1,
+                3,
+                3,
+                1,
+                node_count=3,
+                graph_edges=[(1, 2), (2, 3)],
+                decoded={1: 1, 2: 2, 3: 1},
+            )
+            before = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+            app._open_graph_popout(graph_row, "Test Graph")
+            root.update_idletasks()
+            after = len([child for child in root.winfo_children() if isinstance(child, tk.Toplevel)])
+            self.assertEqual(after, before + 1)
+
+            app_module.messagebox.showinfo = lambda title, message: messages.append((title, message))
+            non_graph_row = BenchmarkRow("N-Queens n4", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            app._open_graph_popout(non_graph_row, "No Graph")
+            self.assertTrue(messages)
+        finally:
+            app_module.messagebox.showinfo = original_showinfo
+            for child in root.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    child.destroy()
             root.destroy()
 
     def test_app_worker_feed_events_are_processed(self):

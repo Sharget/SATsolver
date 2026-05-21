@@ -82,11 +82,19 @@ class _UnsatisfiedTracker:
     def unsatisfied_count(self):
         return len(self.unsatisfied_list)
 
+    def random_unsatisfied_clause_index(self, rng):
+        return rng.choice(self.unsatisfied_list)
+
     def random_unsatisfied_clause(self, rng):
-        return self.clauses[rng.choice(self.unsatisfied_list)]
+        return self.clauses[self.random_unsatisfied_clause_index(rng)]
 
     def flip_score(self, variable):
-        score = self.unsatisfied_count()
+        return self.flip_effect(variable)["unsatisfied_after"]
+
+    def flip_effect(self, variable):
+        unsatisfied_after = self.unsatisfied_count()
+        make = 0
+        break_count = 0
         current_value = self.assignment[variable]
 
         for clause_index in self.occurrences.get(variable, []):
@@ -100,11 +108,18 @@ class _UnsatisfiedTracker:
 
             new_count = old_count + delta
             if old_count == 0 and new_count > 0:
-                score -= 1
+                unsatisfied_after -= 1
+                make += 1
             elif old_count > 0 and new_count == 0:
-                score += 1
+                unsatisfied_after += 1
+                break_count += 1
 
-        return score
+        return {
+            "unsatisfied_after": unsatisfied_after,
+            "make": make,
+            "break": break_count,
+            "delta": break_count - make,
+        }
 
     def flip(self, variable):
         current_value = self.assignment[variable]
@@ -165,9 +180,26 @@ def walksat(
             return default
         return min(1.0, max(0.0, parsed))
 
+    def bool_option(value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on", "enabled")
+        return bool(value)
+
+    def normalise_selection_mode(value):
+        key = str(value or "walksat").strip().lower().replace(" ", "_").replace("-", "_")
+        if key in ("probsat", "prob_sat", "probabilistic"):
+            return "probsat"
+        return "walksat"
+
     max_tries = positive_int(logging_options.get("max_tries", max_tries), 10)
     max_flips = positive_int(logging_options.get("max_flips", max_flips), 10000)
     noise = probability(logging_options.get("noise", noise), 0.5)
+    selection_mode = normalise_selection_mode(logging_options.get("selection_mode"))
+    adaptive_noise = bool_option(logging_options.get("adaptive_noise"), False)
     random_seed = logging_options.get("random_seed")
     rng = random.Random(random_seed) if random_seed not in (None, "") else random.Random()
     log_mode = logging_options.get("mode", "normal")
@@ -175,15 +207,31 @@ def walksat(
         log_mode = "normal"
     progress_interval = positive_int(logging_options.get("progress_interval"), 1000)
     verbose_limit = positive_int(logging_options.get("verbose_limit"), 120)
+    current_noise = noise
+    stagnation_limit = max(100, max_flips // 20)
+    flips_since_global_best = 0
 
     stats = {
         "status": "UNKNOWN",
+        "termination_reason": None,
+        "selection_mode": selection_mode,
+        "adaptive_noise": adaptive_noise,
+        "stagnation_limit": stagnation_limit,
         "tries": 0,
         "flips": 0,
         "best_unsatisfied": None,
+        "best_assignment": None,
+        "restart_stats": [],
+        "hard_clause_hits": {},
+        "flip_make_total": 0,
+        "flip_break_total": 0,
+        "last_make": 0,
+        "last_break": 0,
+        "final_noise": noise,
         "elapsed": 0.0,
         "solver_options": (
             f"tries={max_tries}; flips={max_flips}; noise={noise:g}; "
+            f"strategy={selection_mode}; adaptive_noise={'on' if adaptive_noise else 'off'}; "
             f"seed={random_seed if random_seed not in (None, '') else '-'}"
         ),
     }
@@ -192,10 +240,79 @@ def walksat(
 
     def finish(solution, status):
         stats["status"] = status
+        if status == "SAT":
+            stats["termination_reason"] = "sat"
+        elif status in ("TIMEOUT", "CANCELLED"):
+            stats["termination_reason"] = status.lower()
+        elif stats["termination_reason"] is None:
+            stats["termination_reason"] = "budget_exhausted"
+        stats["final_noise"] = current_noise
         stats["elapsed"] = time.perf_counter() - started
         if return_stats:
             return solution, stats
         return solution
+
+    def log_option_summary():
+        if log_mode not in ("periodic", "debug"):
+            return
+        emit(
+            event_callback,
+            EVENT_LOG,
+            (
+                "      WalkSAT options: "
+                f"strategy={selection_mode}, "
+                f"noise={noise:g}, "
+                f"adaptive_noise={'on' if adaptive_noise else 'off'}, "
+                f"stagnation_limit={stagnation_limit}"
+            ),
+        )
+
+    def log_adaptive_noise(message):
+        if log_mode not in ("periodic", "debug"):
+            return
+        emit(event_callback, EVENT_LOG, f"      WalkSAT adaptive noise: {message}")
+
+    def choose_weighted(candidates):
+        total = sum(weight for _variable, _effect, weight in candidates)
+        if total <= 0:
+            return rng.choice(candidates)
+        target = rng.random() * total
+        running = 0.0
+        for candidate in candidates:
+            running += candidate[2]
+            if running >= target:
+                return candidate
+        return candidates[-1]
+
+    def select_variable(clause):
+        if rng.random() < current_noise:
+            variable = abs(rng.choice(clause))
+            effect = tracker.flip_effect(variable)
+            log_debug(f"random flip variable {variable}")
+            return variable, effect
+
+        effects = [(abs(lit), tracker.flip_effect(abs(lit))) for lit in clause]
+        if selection_mode == "probsat":
+            weighted = [
+                (variable, effect, (effect["make"] + 1) / ((effect["break"] + 1) ** 2))
+                for variable, effect in effects
+            ]
+            variable, effect, _weight = choose_weighted(weighted)
+            log_debug(
+                f"probsat flip variable {variable} "
+                f"make={effect['make']} break={effect['break']} weight={_weight:.4g}"
+            )
+            return variable, effect
+
+        best_score = min(effect["unsatisfied_after"] for _variable, effect in effects)
+        best_candidates = [
+            (variable, effect)
+            for variable, effect in effects
+            if effect["unsatisfied_after"] == best_score
+        ]
+        variable, effect = rng.choice(best_candidates)
+        log_debug(f"greedy flip variable {variable} leaving {best_score} unsatisfied")
+        return variable, effect
 
     def log_debug(message):
         nonlocal verbose_emitted
@@ -219,7 +336,12 @@ def walksat(
                 "      WalkSAT progress: "
                 f"tries={stats['tries']}, "
                 f"flips={stats['flips']}, "
-                f"best_unsatisfied={stats['best_unsatisfied']}"
+                f"best_unsatisfied={stats['best_unsatisfied']}, "
+                f"strategy={selection_mode}, "
+                f"noise={current_noise:.3g}, "
+                f"adaptive_noise={'on' if adaptive_noise else 'off'}, "
+                f"last_make={stats['last_make']}, "
+                f"last_break={stats['last_break']}"
             ),
         )
 
@@ -229,13 +351,16 @@ def walksat(
     normalised, variables, has_empty_clause = _normalise_formula(clauses)
     if has_empty_clause:
         stats["best_unsatisfied"] = 1
+        stats["termination_reason"] = "empty_clause"
         return finish(None, "UNKNOWN")
     if not normalised:
         stats["best_unsatisfied"] = 0
+        stats["best_assignment"] = {variable: False for variable in variables}
         return finish({variable: False for variable in variables}, "SAT")
 
     best_unsatisfied = len(normalised)
     stats["best_unsatisfied"] = best_unsatisfied
+    log_option_summary()
 
     for try_index in range(1, max_tries + 1):
         if stop_requested(cancel_token):
@@ -244,36 +369,82 @@ def walksat(
         stats["tries"] = try_index
         assignment = {variable: rng.choice((False, True)) for variable in variables}
         tracker = _UnsatisfiedTracker(normalised, variables, assignment)
+        try_best_unsatisfied = tracker.unsatisfied_count()
+        try_flips_until_best = 0
+        if stats["best_assignment"] is None and try_best_unsatisfied == best_unsatisfied:
+            stats["best_assignment"] = assignment.copy()
         log_debug(f"try {try_index}: random assignment")
 
-        for _flip_index in range(max_flips):
+        for flip_index in range(max_flips):
             unsatisfied_count = tracker.unsatisfied_count()
+            if unsatisfied_count < try_best_unsatisfied:
+                try_best_unsatisfied = unsatisfied_count
+                try_flips_until_best = flip_index
             if unsatisfied_count < best_unsatisfied:
                 best_unsatisfied = unsatisfied_count
                 stats["best_unsatisfied"] = best_unsatisfied
+                stats["best_assignment"] = assignment.copy()
+                flips_since_global_best = 0
+                if adaptive_noise:
+                    old_noise = current_noise
+                    current_noise = max(noise, current_noise - 0.02)
+                    if current_noise != old_noise:
+                        log_adaptive_noise(f"reduced to {current_noise:.3g} after new best")
                 log_progress()
 
             if unsatisfied_count == 0:
+                stats["best_assignment"] = assignment.copy()
+                stats["restart_stats"].append(
+                    {
+                        "try": try_index,
+                        "best_unsatisfied": try_best_unsatisfied,
+                        "flips_until_best": try_flips_until_best,
+                        "final_unsatisfied": 0,
+                    }
+                )
                 log_progress(force=True)
                 return finish(assignment, "SAT")
 
             if stop_requested(cancel_token):
+                stats["restart_stats"].append(
+                    {
+                        "try": try_index,
+                        "best_unsatisfied": try_best_unsatisfied,
+                        "flips_until_best": try_flips_until_best,
+                        "final_unsatisfied": unsatisfied_count,
+                    }
+                )
                 return finish(None, cancellation_status(cancel_token))
 
-            clause = tracker.random_unsatisfied_clause(rng)
-            if rng.random() < noise:
-                variable = abs(rng.choice(clause))
-                log_debug(f"random flip variable {variable}")
-            else:
-                candidates = [(abs(lit), tracker.flip_score(abs(lit))) for lit in clause]
-                best_break = min(count for _variable, count in candidates)
-                best_variables = [variable for variable, count in candidates if count == best_break]
-                variable = rng.choice(best_variables)
-                log_debug(f"greedy flip variable {variable} leaving {best_break} unsatisfied")
+            clause_index = tracker.random_unsatisfied_clause_index(rng)
+            stats["hard_clause_hits"][clause_index] = stats["hard_clause_hits"].get(clause_index, 0) + 1
+            clause = tracker.clauses[clause_index]
+            variable, effect = select_variable(clause)
+            stats["last_make"] = effect["make"]
+            stats["last_break"] = effect["break"]
+            stats["flip_make_total"] += effect["make"]
+            stats["flip_break_total"] += effect["break"]
 
             tracker.flip(variable)
             stats["flips"] += 1
+            flips_since_global_best += 1
+            if adaptive_noise and flips_since_global_best >= stagnation_limit:
+                old_noise = current_noise
+                current_noise = min(0.9, current_noise + 0.05)
+                flips_since_global_best = 0
+                if current_noise != old_noise:
+                    log_adaptive_noise(f"increased to {current_noise:.3g} after stagnation")
             log_progress()
 
+        stats["restart_stats"].append(
+            {
+                "try": try_index,
+                "best_unsatisfied": try_best_unsatisfied,
+                "flips_until_best": try_flips_until_best,
+                "final_unsatisfied": tracker.unsatisfied_count(),
+            }
+        )
+
     log_progress(force=True)
+    stats["termination_reason"] = "budget_exhausted"
     return finish(None, "UNKNOWN")

@@ -27,7 +27,7 @@ def _options_for_solver(solver_name: str, options: dict) -> dict:
     if solver_name == "CDCL":
         solver_options["random_seed"] = options.get("cdcl_random_seed", options.get("random_seed"))
     elif solver_name == "WalkSAT":
-        for key in ("max_tries", "max_flips", "noise", "random_seed"):
+        for key in ("max_tries", "max_flips", "noise", "random_seed", "selection_mode", "adaptive_noise"):
             solver_key = f"walksat_{key}"
             if solver_key in options:
                 solver_options[key] = options[solver_key]
@@ -167,6 +167,12 @@ def _stats_summary(stats: dict) -> str:
         ("tries", "tries"),
         ("flips", "flips"),
         ("best_unsatisfied", "best unsatisfied"),
+        ("selection_mode", "strategy"),
+        ("adaptive_noise", "adaptive noise"),
+        ("termination_reason", "reason"),
+        ("final_noise", "final noise"),
+        ("flip_make_total", "make"),
+        ("flip_break_total", "break"),
     ]
     parts = [f"{label}={stats[key]}" for key, label in labels if key in stats]
     return ", ".join(parts)
@@ -186,6 +192,8 @@ def _solver_options_summary(solver_name: str, options: dict) -> str:
             f"tries={options.get('max_tries', 10)}; "
             f"flips={options.get('max_flips', 10000)}; "
             f"noise={options.get('noise', 0.5)}; "
+            f"strategy={options.get('selection_mode', 'walksat')}; "
+            f"adaptive_noise={'on' if options.get('adaptive_noise') else 'off'}; "
             f"seed={options.get('random_seed') or '-'}"
         )
     return "DPLL small-clause"

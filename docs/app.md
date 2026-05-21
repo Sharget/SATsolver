@@ -36,19 +36,26 @@ Choose one problem type:
 - DIMACS/CNF: paste or load raw DIMACS clauses.
 
 Then choose `CDCL`, `DPLL`, or `WalkSAT`, generate the CNF preview, and solve.
-CNF files can be saved under `input/generated/`. The compact Solver Guide in
-the controls summarizes the solver families:
+The Solve tab is arranged as a workbench: the top toolbar keeps `Generate CNF`,
+`Solve`, `Cancel`, `Save CNF`, `Load DIMACS`, solver choice, and timeout visible;
+the left settings pane scrolls independently; the center panes hold CNF and
+result text; the right pane holds problem details and graph previews. CNF files
+can be saved under `input/generated/`. The compact Solver Guide in the controls
+summarizes the solver families:
 
 - `CDCL`: complete, learns clauses, backjumps, strongest default for hard
   formulas.
 - `DPLL`: complete, recursive baseline, simpler and useful for comparison.
-- `WalkSAT`: incomplete, random local search, fast on some SAT instances, and
-  returns `UNKNOWN` if no model is found.
+- `WalkSAT`: incomplete local search, fast on some SAT instances, supports
+  Classic and ProbSAT flip strategies, and returns `UNKNOWN` if no model is
+  found.
 
 Advanced solver logs can be enabled for periodic progress messages or capped
 verbose debug messages during a solve. The solve timeout defaults to 30
 seconds; if a solver run exceeds it, the app stops that run and reports
-`TIMEOUT`.
+`TIMEOUT`. WalkSAT progress logs include the active strategy, current noise,
+adaptive-noise state, and recent make/break values; verbose debug logs also show
+ProbSAT flip weights.
 
 The CDCL advanced options let you experiment with search behavior:
 
@@ -70,6 +77,10 @@ WalkSAT has its own `WalkSAT Options` group:
 - `Max flips`: maximum flips per random try.
 - `Noise`: probability of choosing a random variable from an unsatisfied clause
   instead of the best repair flip.
+- `Strategy`: `Classic WalkSAT` keeps the random/greedy mix; `ProbSAT` chooses
+  repair flips probabilistically, favoring low-break and high-make variables.
+- `Adaptive noise`: raises randomness after stagnation and lowers it again when
+  a new best assignment is found.
 - `Random seed`: optional seed for reproducible local search.
 Problem descriptions appear beside the controls, and irrelevant graph/log
 settings are disabled as modes change.
@@ -81,6 +92,10 @@ CNF, solver result, decoded response, problem input, and graph preview into the
 main Solve view. `Cancel Selected` stops only the selected solve job, and
 `Delete Selected` removes one finished solve job. `Clear Finished` removes all
 finished solve jobs from that list.
+
+For graph-like problems, use `Open Graph` to pop the current graph preview into
+a resizable window. The popout can refresh the drawing, export the visible graph
+as PNG, and copy or export only the current graph data.
 
 The shared run feed at the bottom stays global and prefixes messages with the
 job label, such as `J1` or `J2`.
@@ -112,9 +127,12 @@ each benchmark row, exported in CSV files, shown in the selected-case details,
 and included as a comment when saving a selected benchmark CNF. Each benchmark
 solver run also has a timeout, defaulting to 30 seconds. Timed-out runs are kept
 as `TIMEOUT` rows and shown as distinct chart bars before the benchmark
-continues. The chart title shows the active problem type, so bar labels stay
-compact. Results appear in a shared table and Matplotlib chart and can be
-exported to:
+continues. The Benchmark tab keeps run, cancel, skip, export, metric, view, and
+`Refresh Chart` controls in the fixed top toolbar. Settings and job controls
+scroll on the left; the table and chart share the center workspace; selected
+case details and graph preview stay on the right. The chart title shows the
+active problem type, so bar labels stay compact. Results appear in a shared
+table and Matplotlib chart and can be exported to:
 
 ```text
 output/benchmarks/
@@ -134,20 +152,28 @@ from different jobs are easy to distinguish. The Benchmark tab also has a
   does not delete their rows unless you clear results.
 
 Select any benchmark row to inspect that exact case's solver response, decoded
-output, input data, saved CNF, and graph preview. The feed logs each case,
-repeat, CNF generation step, solver start, and solver finish, similar to the old
-console output in `legacy/genearate_graph_coloring.py`. Large benchmark charts
-are not auto-rendered at the end because drawing hundreds of bars can make
-Tkinter feel stuck; use `Refresh Chart` when you want to draw them. Filtering
-between benchmark jobs refreshes the table first and then redraws the chart so
-job switching stays responsive.
+output, input data, saved CNF, and graph preview. Graph Coloring, Hamiltonian
+Path, Independent Set, and Clique rows also support `Open Graph`, which opens a
+resizable graph window with refresh, PNG export, and current-row graph-data copy
+or export actions. The feed logs each case, repeat, CNF generation step, solver
+start, and solver finish, similar to the old console output in
+`legacy/genearate_graph_coloring.py`. Large benchmark charts are not
+auto-rendered at the end because drawing hundreds of bars can make Tkinter feel
+stuck; use `Refresh Chart` when you want to draw them. Filtering between
+benchmark jobs refreshes the table first and then redraws the chart so job
+switching stays responsive.
 
 Use benchmark heuristic comparisons carefully. Changing branching, phase,
 restarts, learned-clause limits, or CDCL random seed changes the CDCL search
-path. Changing WalkSAT tries, flips, noise, or WalkSAT random seed changes the
-local-search path. Compare runs with the same timeout, problem sweep, solver
-set, and repeat count. Random modes should use a seed when you want
-reproducible results.
+path. Changing WalkSAT tries, flips, noise, strategy, adaptive noise, or WalkSAT
+random seed changes the local-search path. Compare runs with the same timeout,
+problem sweep, solver set, and repeat count. Random modes should use a seed when
+you want reproducible results.
+
+WalkSAT result stats also include the best partial assignment found,
+make/break flip totals, restart summaries, and hard-clause hit counts. The
+public status remains `UNKNOWN` when the normal search budget ends without a
+model; the detailed reason appears as `termination_reason=budget_exhausted`.
 
 Use probability mode for quick Erdos-Renyi style experiments. Use exact-edge
 mode when you want fixed edge counts. Use average-degree mode for fairer
@@ -166,6 +192,8 @@ Use `Skip Selected Case` during a benchmark to mark the selected benchmark
 job's current case as `SKIPPED` and continue with the next case. This is useful
 when one generated graph or puzzle is taking much longer than the surrounding
 sweep.
+
+Use `Ctrl+W` to close the desktop app window.
 
 ## Adding More NP Problems
 
