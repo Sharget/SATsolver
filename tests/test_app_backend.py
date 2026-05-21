@@ -1272,18 +1272,68 @@ class AppBackendTests(unittest.TestCase):
             app.root.after_cancel(app.pending_benchmark_chart_after_id)
             app.pending_benchmark_chart_after_id = None
 
-            app._select_job(first.job_id)
-            app.clear_selected_benchmark_run_results()
-            self.assertEqual(app.benchmark_rows, [second_row])
-            self.assertEqual(first.rows, [])
+            app.benchmark_jobs_table.selection_set((first.job_id, second.job_id))
+            app._on_benchmark_job_selected()
+            app.show_selected_benchmark_run()
+            self.assertEqual(app.benchmark_filter_run_label, (first.label, second.label))
+            self.assertEqual(app._visible_benchmark_rows(), [first_row, second_row])
             if app.pending_benchmark_chart_after_id is not None:
                 app.root.after_cancel(app.pending_benchmark_chart_after_id)
                 app.pending_benchmark_chart_after_id = None
 
             app.clear_all_benchmark_results()
-            self.assertEqual(app.benchmark_rows, [])
+            self.assertEqual(app.benchmark_rows, [first_row, second_row])
+            self.assertEqual(app.benchmark_filter_run_label, ())
+            self.assertEqual(app._visible_benchmark_rows(), [])
             self.assertEqual(len(app.benchmark_table.get_children()), 0)
+            self.assertEqual(app.benchmark_jobs_table.selection(), ())
+            if app.pending_benchmark_chart_after_id is not None:
+                app.root.after_cancel(app.pending_benchmark_chart_after_id)
+                app.pending_benchmark_chart_after_id = None
+
+            app.show_all_benchmark_runs()
+            self.assertEqual(app.benchmark_rows, [first_row, second_row])
+            self.assertEqual(len(app.benchmark_table.get_children()), 2)
+            if app.pending_benchmark_chart_after_id is not None:
+                app.root.after_cancel(app.pending_benchmark_chart_after_id)
+                app.pending_benchmark_chart_after_id = None
         finally:
+            root.destroy()
+
+    def test_export_benchmark_csv_uses_visible_rows(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        original_dialog = app_module.filedialog.asksaveasfilename
+        original_writer = app_module.write_benchmark_csv
+        original_showinfo = app_module.messagebox.showinfo
+        exported = {}
+        try:
+            app = SATApp(root)
+            first = app._create_job("benchmark", "First benchmark")
+            second = app._create_job("benchmark", "Second benchmark")
+            first_row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            second_row = BenchmarkRow("case two", "N-Queens", "WalkSAT", "UNKNOWN", 0.2, 1, 1, 1)
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": first.job_id, "row": first_row}, current=1, total=2))
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": second.job_id, "row": second_row}, current=1, total=2))
+            app.benchmark_filter_run_label = first.label
+            app._fill_benchmark_table()
+
+            app_module.filedialog.asksaveasfilename = lambda **_kwargs: "visible.csv"
+            app_module.write_benchmark_csv = lambda path, rows: exported.update(path=path, rows=list(rows))
+            app_module.messagebox.showinfo = lambda *_args, **_kwargs: None
+
+            app.export_benchmark_csv()
+
+            self.assertEqual(exported["path"], "visible.csv")
+            self.assertEqual(exported["rows"], [first_row])
+        finally:
+            app_module.filedialog.asksaveasfilename = original_dialog
+            app_module.write_benchmark_csv = original_writer
+            app_module.messagebox.showinfo = original_showinfo
             root.destroy()
 
     def test_clear_benchmark_table_clears_results_but_keeps_jobs(self):
@@ -1345,7 +1395,7 @@ class AppBackendTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_delete_selected_benchmark_job_removes_its_rows_only(self):
+    def test_delete_selected_benchmark_jobs_removes_their_rows_only(self):
         try:
             root = tk.Tk()
         except tk.TclError as exc:
@@ -1366,19 +1416,19 @@ class AppBackendTests(unittest.TestCase):
 
             app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": first.job_id, "row": first_row}, current=1, total=2))
             app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": second.job_id, "row": second_row}, current=1, total=2))
-            app._select_job(first.job_id)
-            app.benchmark_filter_run_label = first.label
+            app.benchmark_jobs_table.selection_set((first.job_id, second.job_id))
+            app._on_benchmark_job_selected()
+            app.benchmark_filter_run_label = (first.label, second.label)
 
             app.delete_selected_benchmark_job()
 
             self.assertNotIn(first.job_id, app.jobs)
-            self.assertIn(second.job_id, app.jobs)
+            self.assertNotIn(second.job_id, app.jobs)
             self.assertFalse(app.benchmark_jobs_table.exists(first.job_id))
-            self.assertTrue(app.benchmark_jobs_table.exists(second.job_id))
-            self.assertEqual(app.benchmark_rows, [second_row])
+            self.assertFalse(app.benchmark_jobs_table.exists(second.job_id))
+            self.assertEqual(app.benchmark_rows, [])
             self.assertIsNone(app.benchmark_filter_run_label)
-            self.assertEqual(len(app.benchmark_table.get_children()), 1)
-            self.assertEqual(app.benchmark_table.set(app.benchmark_table.get_children()[0], "run"), second.label)
+            self.assertEqual(len(app.benchmark_table.get_children()), 0)
 
             if app.pending_benchmark_chart_after_id is not None:
                 app.root.after_cancel(app.pending_benchmark_chart_after_id)

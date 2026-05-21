@@ -140,14 +140,18 @@ output/benchmarks/
 
 Benchmark rows appear as each solver run finishes. When multiple benchmarks are
 running at once, the table and CSV export include a `Run`/`run` label so rows
-from different jobs are easy to distinguish. The Benchmark tab also has a
-`Benchmark Jobs` panel:
+from different jobs are easy to distinguish. `Export CSV` writes the rows
+currently shown in the benchmark table, so filtered views export only that
+filtered subset. The Benchmark tab also has a `Benchmark Jobs` panel:
 
-- `Show Selected Run` filters the shared table and chart to that job's rows.
+- `Show Selected Runs` filters the shared table and chart to the selected job
+  rows; select multiple jobs to compare or export only those runs.
 - `Show All Runs` restores the combined benchmark table and chart.
-- `Clear Selected Results` removes only that selected job's benchmark rows.
-- `Delete Selected Job` removes one finished benchmark job and its rows.
-- `Clear Table` or `Clear All Results` empties the benchmark result table.
+- `Hide Results` clears the current job selection and shows an empty table
+  without deleting saved benchmark rows.
+- `Delete Selected Jobs` removes the selected finished benchmark jobs and their
+  rows; multi-select is supported.
+- `Clear Table` empties the benchmark result table.
 - `Clear Finished Jobs` removes finished benchmark jobs from the job list, but
   does not delete their rows unless you clear results.
 

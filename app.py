@@ -155,7 +155,7 @@ class SATApp:
         self.selected_job_id: str | None = None
         self.selected_solve_job_id: str | None = None
         self.selected_benchmark_job_id: str | None = None
-        self.benchmark_filter_run_label: str | None = None
+        self.benchmark_filter_run_label: str | tuple[str, ...] | None = None
         self.pending_benchmark_chart_after_id = None
         self.updating_job_selection = False
 
@@ -380,6 +380,23 @@ class SATApp:
     def _selected_benchmark_job(self) -> RunJob | None:
         return self.jobs.get(self.selected_benchmark_job_id) if self.selected_benchmark_job_id else None
 
+    def _selected_benchmark_jobs(self) -> list[RunJob]:
+        table = getattr(self, "benchmark_jobs_table", None)
+        if table is None:
+            job = self._selected_benchmark_job()
+            return [job] if job is not None else []
+        selected_ids = set(table.selection())
+        if not selected_ids:
+            job = self._selected_benchmark_job()
+            return [job] if job is not None else []
+        jobs = []
+        for job_id in table.get_children():
+            if job_id in selected_ids:
+                job = self.jobs.get(job_id)
+                if job is not None and job.kind == "benchmark":
+                    jobs.append(job)
+        return jobs
+
     def _job_kind_group(self, job: RunJob) -> str:
         return "benchmark" if job.kind == "benchmark" else "solve"
 
@@ -490,7 +507,8 @@ class SATApp:
             self.selected_benchmark_job_id = None
             self._refresh_job_buttons()
             return
-        job_id = selected[0]
+        focused = self.benchmark_jobs_table.focus()
+        job_id = focused if focused in selected else selected[-1]
         self.selected_benchmark_job_id = job_id
         self.selected_job_id = job_id
         self._refresh_job_buttons()
@@ -506,9 +524,11 @@ class SATApp:
         has_finished_solve = any(self._job_kind_group(job) == "solve" and job.finished for job in self.jobs.values())
         has_finished_benchmark = any(job.kind == "benchmark" and job.finished for job in self.jobs.values())
         has_benchmark_rows = bool(self.benchmark_rows)
-        selected_run_has_rows = benchmark_job is not None and any(row.run_label == benchmark_job.label for row in self.benchmark_rows)
+        selected_benchmark_jobs = self._selected_benchmark_jobs()
+        selected_run_labels = {job.label for job in selected_benchmark_jobs}
+        selected_run_has_rows = any(row.run_label in selected_run_labels for row in self.benchmark_rows)
         can_delete_solve = solve_job is not None and solve_job.finished
-        can_delete_benchmark = benchmark_job is not None and benchmark_job.finished
+        can_delete_benchmark = any(job.finished for job in selected_benchmark_jobs)
 
         if hasattr(self, "solve_cancel_button"):
             self.solve_cancel_button.configure(state=tk.NORMAL if solve_running else tk.DISABLED)
@@ -536,8 +556,6 @@ class SATApp:
             self.benchmark_show_all_button.configure(state=tk.NORMAL if self.benchmark_filter_run_label is not None else tk.DISABLED)
         if hasattr(self, "benchmark_clear_finished_jobs_button"):
             self.benchmark_clear_finished_jobs_button.configure(state=tk.NORMAL if has_finished_benchmark else tk.DISABLED)
-        if hasattr(self, "benchmark_clear_selected_results_button"):
-            self.benchmark_clear_selected_results_button.configure(state=tk.NORMAL if selected_run_has_rows else tk.DISABLED)
         if hasattr(self, "benchmark_clear_all_results_button"):
             self.benchmark_clear_all_results_button.configure(state=tk.NORMAL if has_benchmark_rows else tk.DISABLED)
         if hasattr(self, "clear_benchmark_table_button"):
@@ -693,10 +711,35 @@ class SATApp:
         self._delete_finished_job(job, remove_benchmark_rows=False)
 
     def delete_selected_benchmark_job(self) -> None:
-        job = self._selected_benchmark_job()
-        if job is None or not job.finished:
+        jobs = [job for job in self._selected_benchmark_jobs() if job.finished]
+        if not jobs:
             return
-        self._delete_finished_job(job, remove_benchmark_rows=True)
+        run_labels = {job.label for job in jobs}
+        self.benchmark_rows = [
+            row
+            for row in self.benchmark_rows
+            if row.run_label not in run_labels
+        ]
+        self._remove_benchmark_filter_labels(run_labels)
+
+        table = self._job_table_for_group("benchmark")
+        deleted_labels = []
+        deleted_ids = {job.job_id for job in jobs}
+        for job in jobs:
+            deleted_labels.append(job.label)
+            if table is not None and table.exists(job.job_id):
+                table.delete(job.job_id)
+            if job.job_id in self.jobs:
+                del self.jobs[job.job_id]
+
+        if self.selected_job_id in deleted_ids:
+            self.selected_job_id = None
+        if self.selected_benchmark_job_id in deleted_ids:
+            self.selected_benchmark_job_id = None
+        self._set_benchmark_status(f"Deleted {', '.join(deleted_labels)}.")
+        self._fill_benchmark_table()
+        self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
 
     def _delete_finished_job(self, job: RunJob, *, remove_benchmark_rows: bool) -> None:
         if not job.finished:
@@ -710,8 +753,7 @@ class SATApp:
                 for row in self.benchmark_rows
                 if row.run_label != run_label
             ]
-            if self.benchmark_filter_run_label == run_label:
-                self.benchmark_filter_run_label = None
+            self._remove_benchmark_filter_labels({run_label})
 
         table = self._job_table_for_group(group)
         if table is not None and table.exists(job.job_id):
@@ -799,7 +841,7 @@ class SATApp:
                     row.run_label = job.label
                     job.rows.append(row)
                 self.benchmark_rows.append(row)
-                if self.benchmark_filter_run_label is None or row.run_label == self.benchmark_filter_run_label:
+                if self._benchmark_row_is_visible(row):
                     self._insert_benchmark_row(row)
                 self._refresh_job_buttons()
             self._apply_progress(event, job)
@@ -996,6 +1038,8 @@ class SATApp:
         left_shell = ttk.Frame(workspace)
         center = ttk.Frame(workspace)
         detail_shell = ttk.Frame(workspace)
+        left_shell.configure(width=340)
+        detail_shell.configure(width=320)
         workspace.add(left_shell, weight=0)
         workspace.add(center, weight=1)
         workspace.add(detail_shell, weight=0)
@@ -1007,6 +1051,7 @@ class SATApp:
 
         controls = ttk.LabelFrame(left, text="Problem", padding=8)
         controls.pack(fill=tk.X)
+        controls.columnconfigure(1, weight=1)
 
         ttk.Label(controls, text="Type").grid(row=0, column=0, sticky="w")
         problem_box = ttk.Combobox(
@@ -1014,7 +1059,7 @@ class SATApp:
             textvariable=self.problem_kind,
             values=PROBLEM_KINDS,
             state="readonly",
-            width=24,
+            width=20,
         )
         problem_box.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         problem_box.bind("<<ComboboxSelected>>", lambda _event: self._refresh_problem_form())
@@ -1023,54 +1068,63 @@ class SATApp:
         ttk.Label(
             controls,
             textvariable=self.problem_description,
-            wraplength=250,
+            wraplength=215,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
-        self.solve_solver_guide = self._build_solver_guide(controls, row=2, wraplength=230)
-        self._build_solve_jobs_panel(controls, row=3)
+        self.problem_form = ttk.LabelFrame(left, text="Input", padding=8)
+        self.problem_form.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        self.problem_form.columnconfigure(0, weight=1)
+
+        solve_jobs_host = ttk.Frame(left)
+        solve_jobs_host.pack(fill=tk.X, pady=(10, 0))
+        solve_jobs_host.columnconfigure(0, weight=1)
+        self._build_solve_jobs_panel(solve_jobs_host, row=0)
+
+        solver_controls = ttk.LabelFrame(left, text="Solver Options", padding=8)
+        solver_controls.pack(fill=tk.X, pady=(10, 0))
+        solver_controls.columnconfigure(1, weight=1)
+
+        self.solve_solver_guide = self._build_solver_guide(solver_controls, row=0, wraplength=200)
 
         ttk.Checkbutton(
-            controls,
+            solver_controls,
             text="Advanced solver logs",
             variable=self.advanced_solver_logs,
             command=self._refresh_solver_log_controls,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.solver_log_label = ttk.Label(controls, text="Log detail")
-        self.solver_log_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.solver_log_label = ttk.Label(solver_controls, text="Log detail")
+        self.solver_log_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.solver_log_box = ttk.Combobox(
-            controls,
+            solver_controls,
             textvariable=self.solver_log_level,
             values=("Periodic progress", "Verbose debug"),
             state=tk.DISABLED,
-            width=24,
+            width=20,
         )
-        self.solver_log_box.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.solver_log_box.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
         self.solve_cdcl_options_frame = self._build_cdcl_option_group(
-            controls,
-            6,
+            solver_controls,
+            3,
             self.cdcl_branching,
             self.cdcl_initial_phase,
             self.cdcl_restarts,
             self.cdcl_restart_interval,
             self.cdcl_learned_clause_limit,
             self.cdcl_random_seed,
-            width=24,
+            width=20,
         )
         self.solve_walksat_options_frame = self._build_walksat_option_group(
-            controls,
-            7,
+            solver_controls,
+            4,
             self.walksat_max_tries,
             self.walksat_max_flips,
             self.walksat_noise,
             self.walksat_selection_mode,
             self.walksat_adaptive_noise,
             self.walksat_random_seed,
-            width=24,
+            width=20,
         )
-
-        self.problem_form = ttk.LabelFrame(left, text="Input", padding=8)
-        self.problem_form.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         center_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
         center_pane.grid(row=0, column=0, sticky="nsew")
@@ -1141,11 +1195,17 @@ class SATApp:
         panel.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         panel.columnconfigure(0, weight=1)
 
-        self.solve_jobs_table = self._build_job_table(panel, self._on_solve_job_selected)
+        compact_widths = {"label": 130, "status": 82, "progress": 64}
+        self.solve_jobs_table = self._build_job_table(
+            panel,
+            self._on_solve_job_selected,
+            height=3,
+            widths=compact_widths,
+        )
         solve_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.solve_jobs_table.yview)
         self.solve_jobs_table.configure(yscrollcommand=solve_scroll.set)
-        self.solve_jobs_table.grid(row=0, column=0, columnspan=3, sticky="ew")
-        solve_scroll.grid(row=0, column=3, sticky="ns")
+        self.solve_jobs_table.grid(row=0, column=0, columnspan=2, sticky="ew")
+        solve_scroll.grid(row=0, column=2, sticky="ns")
         self.solve_jobs_scrollbar = solve_scroll
 
         self.solve_cancel_button = ttk.Button(
@@ -1176,18 +1236,31 @@ class SATApp:
             style="Danger.TButton",
         )
         self.solve_cancel_button.grid(row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
-        self.solve_load_button.grid(row=1, column=1, sticky="ew", padx=3, pady=(6, 0))
-        self.solve_clear_finished_button.grid(row=1, column=2, sticky="ew", padx=(3, 0), pady=(6, 0))
-        self.solve_delete_button.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.solve_load_button.grid(row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.solve_clear_finished_button.grid(row=2, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
+        self.solve_delete_button.grid(row=2, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
 
-    def _build_job_table(self, parent, select_callback):
-        table = ttk.Treeview(parent, columns=("label", "status", "progress"), show="headings", height=4)
+    def _build_job_table(
+        self,
+        parent,
+        select_callback,
+        height: int = 4,
+        widths: dict[str, int] | None = None,
+        selectmode: str = "browse",
+    ):
+        table = ttk.Treeview(
+            parent,
+            columns=("label", "status", "progress"),
+            show="headings",
+            height=height,
+            selectmode=selectmode,
+        )
         headings = {
             "label": "Job",
             "status": "Status",
             "progress": "Progress",
         }
-        widths = {
+        widths = widths or {
             "label": 210,
             "status": 120,
             "progress": 80,
@@ -1206,22 +1279,24 @@ class SATApp:
         self.solve_detail_frame.grid(row=0, column=0, sticky="nsew")
         self.solve_detail_frame.columnconfigure(0, weight=1)
         self.solve_detail_frame.rowconfigure(0, weight=1)
-        self.solve_detail_frame.rowconfigure(1, weight=2)
 
-        summary_frame = ttk.Frame(self.solve_detail_frame)
-        summary_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.solve_detail_pane = ttk.PanedWindow(self.solve_detail_frame, orient=tk.VERTICAL)
+        self.solve_detail_pane.grid(row=0, column=0, sticky="nsew")
+
+        summary_frame = ttk.Frame(self.solve_detail_pane)
         summary_frame.rowconfigure(1, weight=1)
         summary_frame.columnconfigure(0, weight=1)
         ttk.Label(summary_frame, text="Stats and response").grid(row=0, column=0, sticky="w")
-        self.solve_detail_text = tk.Text(summary_frame, height=8, width=42, wrap=tk.WORD)
+        self.solve_detail_text = tk.Text(summary_frame, height=8, width=34, wrap=tk.WORD)
         self.solve_detail_text.grid(row=1, column=0, sticky="nsew")
         detail_scroll = ttk.Scrollbar(summary_frame, orient=tk.VERTICAL, command=self.solve_detail_text.yview)
         detail_scroll.grid(row=1, column=1, sticky="ns")
         self.solve_detail_text.configure(yscrollcommand=detail_scroll.set)
         ttk.Button(summary_frame, text="Copy response", command=self.copy_solve_response).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        self.solve_detail_notebook = ttk.Notebook(self.solve_detail_frame)
-        self.solve_detail_notebook.grid(row=1, column=0, sticky="nsew")
+        self.solve_detail_notebook = ttk.Notebook(self.solve_detail_pane)
+        self.solve_detail_pane.add(summary_frame, weight=1)
+        self.solve_detail_pane.add(self.solve_detail_notebook, weight=2)
 
         input_frame = ttk.Frame(self.solve_detail_notebook, padding=6)
         input_frame.rowconfigure(1, weight=1)
@@ -1229,7 +1304,7 @@ class SATApp:
         self.solve_detail_notebook.add(input_frame, text="Input")
         self.solve_input_label = tk.StringVar(value="Problem data")
         ttk.Label(input_frame, textvariable=self.solve_input_label).grid(row=0, column=0, sticky="w")
-        self.solve_input_text = tk.Text(input_frame, height=14, width=42, wrap=tk.WORD)
+        self.solve_input_text = tk.Text(input_frame, height=14, width=34, wrap=tk.WORD)
         self.solve_input_text.grid(row=1, column=0, sticky="nsew")
         input_scroll = ttk.Scrollbar(input_frame, orient=tk.VERTICAL, command=self.solve_input_text.yview)
         input_scroll.grid(row=1, column=1, sticky="ns")
@@ -1241,7 +1316,7 @@ class SATApp:
         visual_frame.columnconfigure(0, weight=1)
         self.solve_detail_notebook.add(visual_frame, text="Graph")
         self.solve_visual_status = tk.StringVar(value="Generate or solve a graph problem to preview it.")
-        ttk.Label(visual_frame, textvariable=self.solve_visual_status, wraplength=360).grid(row=0, column=0, sticky="ew")
+        ttk.Label(visual_frame, textvariable=self.solve_visual_status, wraplength=300).grid(row=0, column=0, sticky="ew")
         graph_buttons = ttk.Frame(visual_frame)
         graph_buttons.grid(row=1, column=0, sticky="ew", pady=(4, 6))
         graph_buttons.columnconfigure(0, weight=1)
@@ -1468,14 +1543,14 @@ class SATApp:
         ttk.Button(top, text="Clear", command=lambda: self._build_sudoku_grid()).pack(side=tk.RIGHT)
 
         self.sudoku_viewport = ttk.Frame(self.problem_form)
-        self.sudoku_viewport.pack(anchor="nw")
+        self.sudoku_viewport.pack(fill=tk.X, anchor="nw")
         self.sudoku_viewport.columnconfigure(0, weight=1)
         self.sudoku_viewport.rowconfigure(0, weight=1)
 
         self.sudoku_canvas = tk.Canvas(
             self.sudoku_viewport,
-            width=230,
-            height=210,
+            width=300,
+            height=300,
             highlightthickness=0,
             borderwidth=0,
         )
@@ -1518,7 +1593,9 @@ class SATApp:
 
         size = int(self.sudoku_size.get())
         entry_width = 2 if size >= 16 else 3
-        self.sudoku_canvas.configure(width=230, height=210)
+        canvas_width = 340 if size >= 16 else 300
+        canvas_height = 320 if size >= 16 else 300
+        self.sudoku_canvas.configure(width=canvas_width, height=canvas_height)
         self.sudoku_entries = []
 
         for r in range(size):
@@ -1537,6 +1614,7 @@ class SATApp:
     def _build_n_queens_form(self) -> None:
         fields = ttk.Frame(self.problem_form)
         fields.pack(fill=tk.X)
+        fields.columnconfigure(1, weight=1)
         self.n_queens_size = tk.StringVar(value="8")
 
         ttk.Label(fields, text="Board size n").grid(row=0, column=0, sticky="w", pady=2)
@@ -1597,6 +1675,7 @@ class SATApp:
 
         fields = ttk.Frame(self.problem_form)
         fields.pack(fill=tk.X, pady=(10, 0))
+        fields.columnconfigure(1, weight=1)
         self.graph_nodes = tk.StringVar(value="10")
         self.graph_colors = tk.StringVar(value="3")
         self.graph_target = tk.StringVar(value="3")
@@ -2570,7 +2649,11 @@ class SATApp:
         panel.columnconfigure(0, weight=1)
         panel.columnconfigure(1, weight=1)
 
-        self.benchmark_jobs_table = self._build_job_table(panel, self._on_benchmark_job_selected)
+        self.benchmark_jobs_table = self._build_job_table(
+            panel,
+            self._on_benchmark_job_selected,
+            selectmode="extended",
+        )
         benchmark_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.benchmark_jobs_table.yview)
         self.benchmark_jobs_table.configure(yscrollcommand=benchmark_scroll.set)
         self.benchmark_jobs_table.grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -2593,7 +2676,7 @@ class SATApp:
         )
         self.benchmark_show_selected_button = ttk.Button(
             panel,
-            text="Show Selected Run",
+            text="Show Selected Runs",
             command=self.show_selected_benchmark_run,
             state=tk.DISABLED,
             style="Primary.TButton",
@@ -2610,22 +2693,15 @@ class SATApp:
             command=self.clear_finished_benchmark_jobs,
             state=tk.DISABLED,
         )
-        self.benchmark_clear_selected_results_button = ttk.Button(
-            panel,
-            text="Clear Selected Results",
-            command=self.clear_selected_benchmark_run_results,
-            state=tk.DISABLED,
-        )
         self.benchmark_clear_all_results_button = ttk.Button(
             panel,
-            text="Clear All Results",
+            text="Hide Results",
             command=self.clear_all_benchmark_results,
             state=tk.DISABLED,
-            style="Danger.TButton",
         )
         self.benchmark_delete_job_button = ttk.Button(
             panel,
-            text="Delete Selected Job",
+            text="Delete Selected Jobs",
             command=self.delete_selected_benchmark_job,
             state=tk.DISABLED,
             style="Danger.TButton",
@@ -2636,9 +2712,8 @@ class SATApp:
         self.benchmark_show_selected_button.grid(row=2, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
         self.benchmark_show_all_button.grid(row=2, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
         self.benchmark_clear_finished_jobs_button.grid(row=3, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
-        self.benchmark_clear_selected_results_button.grid(row=3, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
-        self.benchmark_delete_job_button.grid(row=4, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
-        self.benchmark_clear_all_results_button.grid(row=4, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_clear_all_results_button.grid(row=3, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        self.benchmark_delete_job_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.benchmark_status = tk.StringVar(value="Showing all benchmark rows.")
         ttk.Label(panel, textvariable=self.benchmark_status, wraplength=230).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
@@ -2650,10 +2725,11 @@ class SATApp:
         self.benchmark_detail_frame.grid(row=0, column=0, sticky="nsew")
         self.benchmark_detail_frame.columnconfigure(0, weight=1)
         self.benchmark_detail_frame.rowconfigure(0, weight=1)
-        self.benchmark_detail_frame.rowconfigure(1, weight=2)
 
-        summary_frame = ttk.Frame(self.benchmark_detail_frame)
-        summary_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.benchmark_detail_pane = ttk.PanedWindow(self.benchmark_detail_frame, orient=tk.VERTICAL)
+        self.benchmark_detail_pane.grid(row=0, column=0, sticky="nsew")
+
+        summary_frame = ttk.Frame(self.benchmark_detail_pane)
         summary_frame.rowconfigure(1, weight=1)
         summary_frame.columnconfigure(0, weight=1)
         ttk.Label(summary_frame, text="Stats and response").grid(row=0, column=0, sticky="w")
@@ -2674,8 +2750,9 @@ class SATApp:
             style="Export.TButton",
         ).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-        self.benchmark_detail_notebook = ttk.Notebook(self.benchmark_detail_frame)
-        self.benchmark_detail_notebook.grid(row=1, column=0, sticky="nsew")
+        self.benchmark_detail_notebook = ttk.Notebook(self.benchmark_detail_pane)
+        self.benchmark_detail_pane.add(summary_frame, weight=1)
+        self.benchmark_detail_pane.add(self.benchmark_detail_notebook, weight=2)
 
         edge_frame = ttk.Frame(self.benchmark_detail_notebook, padding=6)
         edge_frame.rowconfigure(1, weight=1)
@@ -3102,13 +3179,56 @@ class SATApp:
             messagebox.showerror("Benchmark failed", str(exc))
 
     def _visible_benchmark_rows(self) -> list[BenchmarkRow]:
-        if self.benchmark_filter_run_label is None:
+        labels = self._benchmark_filter_labels()
+        if labels is None:
             return list(self.benchmark_rows)
         return [
             row
             for row in self.benchmark_rows
-            if row.run_label == self.benchmark_filter_run_label
+            if row.run_label in labels
         ]
+
+    def _benchmark_filter_labels(self) -> set[str] | None:
+        label_filter = self.benchmark_filter_run_label
+        if label_filter is None:
+            return None
+        if isinstance(label_filter, str):
+            return {label_filter}
+        return set(label_filter)
+
+    def _benchmark_filter_label_text(self) -> str:
+        label_filter = self.benchmark_filter_run_label
+        if label_filter is None:
+            return "all benchmark rows"
+        if label_filter == ():
+            return "no selected runs"
+        if isinstance(label_filter, str):
+            return label_filter
+        return ", ".join(label_filter)
+
+    def _benchmark_row_is_visible(self, row: BenchmarkRow) -> bool:
+        labels = self._benchmark_filter_labels()
+        return labels is None or row.run_label in labels
+
+    def _remove_benchmark_filter_labels(self, removed_labels: set[str]) -> None:
+        labels = self._benchmark_filter_labels()
+        if labels is None:
+            return
+        remaining = tuple(label for label in self._benchmark_filter_label_order() if label not in removed_labels)
+        if not remaining:
+            self.benchmark_filter_run_label = None
+        elif len(remaining) == 1:
+            self.benchmark_filter_run_label = remaining[0]
+        else:
+            self.benchmark_filter_run_label = remaining
+
+    def _benchmark_filter_label_order(self) -> tuple[str, ...]:
+        label_filter = self.benchmark_filter_run_label
+        if label_filter is None:
+            return ()
+        if isinstance(label_filter, str):
+            return (label_filter,)
+        return label_filter
 
     def _set_benchmark_status(self, message: str) -> None:
         if hasattr(self, "benchmark_status"):
@@ -3130,14 +3250,15 @@ class SATApp:
         if self.benchmark_filter_run_label is None:
             self._set_benchmark_status(f"Showing all benchmark rows ({visible_count}).")
         else:
-            self._set_benchmark_status(f"Showing {self.benchmark_filter_run_label} ({visible_count} rows).")
+            self._set_benchmark_status(f"Showing {self._benchmark_filter_label_text()} ({visible_count} rows).")
 
     def show_selected_benchmark_run(self) -> None:
-        job = self._selected_benchmark_job()
-        if job is None:
+        jobs = self._selected_benchmark_jobs()
+        if not jobs:
             return
-        self._set_benchmark_status(f"Showing {job.label}...")
-        self.benchmark_filter_run_label = job.label
+        labels = tuple(job.label for job in jobs)
+        self.benchmark_filter_run_label = labels[0] if len(labels) == 1 else labels
+        self._set_benchmark_status(f"Showing {self._benchmark_filter_label_text()}...")
         self._fill_benchmark_table()
         self._schedule_benchmark_chart_refresh()
         self._refresh_job_buttons()
@@ -3150,25 +3271,35 @@ class SATApp:
         self._refresh_job_buttons()
 
     def clear_selected_benchmark_run_results(self) -> None:
-        job = self._selected_benchmark_job()
-        if job is None:
+        jobs = self._selected_benchmark_jobs()
+        if not jobs:
             return
-        run_label = job.label
+        run_labels = {job.label for job in jobs}
         self.benchmark_rows = [
             row
             for row in self.benchmark_rows
-            if row.run_label != run_label
+            if row.run_label not in run_labels
         ]
-        job.rows = []
-        if self.benchmark_filter_run_label == run_label:
-            self.benchmark_filter_run_label = None
-        self._set_benchmark_status(f"Cleared {run_label} results.")
+        for job in jobs:
+            job.rows = []
+        self._remove_benchmark_filter_labels(run_labels)
+        self._set_benchmark_status(f"Cleared {', '.join(job.label for job in jobs)} results.")
         self._fill_benchmark_table()
         self._schedule_benchmark_chart_refresh()
         self._refresh_job_buttons()
 
     def clear_all_benchmark_results(self) -> None:
-        self.clear_benchmark_table()
+        table = getattr(self, "benchmark_jobs_table", None)
+        if table is not None:
+            table.selection_remove(table.selection())
+        if self.selected_job_id == self.selected_benchmark_job_id:
+            self.selected_job_id = None
+        self.selected_benchmark_job_id = None
+        self.benchmark_filter_run_label = ()
+        self._set_benchmark_status("No benchmark runs selected.")
+        self._fill_benchmark_table()
+        self._schedule_benchmark_chart_refresh()
+        self._refresh_job_buttons()
 
     def clear_benchmark_table(self) -> None:
         self.benchmark_rows = []
@@ -3193,7 +3324,7 @@ class SATApp:
         if self.benchmark_filter_run_label is None:
             self._set_benchmark_status(f"Showing all benchmark rows ({visible_count}).")
         else:
-            self._set_benchmark_status(f"Showing {self.benchmark_filter_run_label} ({visible_count} rows).")
+            self._set_benchmark_status(f"Showing {self._benchmark_filter_label_text()} ({visible_count} rows).")
         self.selected_benchmark_row = None
         if hasattr(self, "benchmark_detail_text"):
             self._write_text_widget(self.benchmark_detail_text, "Select a benchmark row to see its stats and response.")
@@ -4017,7 +4148,7 @@ class SATApp:
 
         suffix = " (Average repeats)" if hasattr(self, "chart_view") and self.chart_view.get() == "Average repeats" else ""
         if self.benchmark_filter_run_label is not None:
-            suffix = f"{suffix} - {self.benchmark_filter_run_label}"
+            suffix = f"{suffix} - {self._benchmark_filter_label_text()}"
         if len(problem_types) == 1:
             return f"{problem_types[0]} - {metric}{suffix}"
         if problem_types:
@@ -4042,8 +4173,9 @@ class SATApp:
             axis.legend(handles=handles, loc="best", fontsize=8)
 
     def export_benchmark_csv(self) -> None:
-        if not self.benchmark_rows:
-            messagebox.showinfo("No benchmark data", "Run a benchmark first.")
+        rows = self._visible_benchmark_rows()
+        if not rows:
+            messagebox.showinfo("No benchmark data", "There are no visible benchmark rows to export.")
             return
 
         default_name = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -4055,7 +4187,7 @@ class SATApp:
         )
 
         if path:
-            write_benchmark_csv(path, self.benchmark_rows)
+            write_benchmark_csv(path, rows)
             messagebox.showinfo("Exported", f"Saved benchmark CSV to {path}")
 
     def export_benchmark_chart(self) -> None:
