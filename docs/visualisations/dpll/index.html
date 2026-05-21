@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>DPLL SAT Visualizator — versiune reparată</title>
+<title>DPLL SAT Visualizator — revamp</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -74,7 +74,7 @@
     height: calc(100vh - 66px - 34px);
     min-height: 0;
     display: grid;
-    grid-template-columns: 345px minmax(760px, 1fr);
+    grid-template-columns: 315px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) 230px;
     gap: 0;
   }
@@ -88,7 +88,7 @@
   }
 
   .panel-tree {
-    padding: 14px 205px 12px 18px;
+    padding: 14px 18px 12px 18px;
     overflow: hidden;
     overflow: auto;
   }
@@ -96,7 +96,7 @@
   .panel-impl {
     background: var(--panel);
     border-top: 1px solid var(--border);
-    padding: 10px 205px 8px 18px;
+    padding: 10px 18px 8px 18px;
     overflow: hidden;
     overflow: auto;
   }
@@ -142,6 +142,35 @@
   .clause.sat-clause {
     background: var(--green-bg);
     border-color: #22c55e;
+    color: #14532d;
+  }
+
+  .clause.partial-clause {
+    background: #fafafa;
+    border-color: var(--border);
+    color: var(--text);
+  }
+
+  .clause.false-clause {
+    background: var(--red-bg);
+    border-color: #ef4444;
+    color: #7f1d1d;
+  }
+
+  .lit-ok {
+    color: var(--green);
+    font-weight: 900;
+  }
+
+  .lit-bad {
+    color: #94a3b8;
+  }
+
+  .clause-meta {
+    float: right;
+    color: var(--muted);
+    font-size: 10px;
+    margin-left: 8px;
   }
 
   .side-block {
@@ -202,9 +231,9 @@
     border-radius: 14px;
     padding: 8px;
     box-shadow: var(--shadow);
-    width: min(100%, 900px);
+    width: 100%;
     min-width: 0;
-    height: calc(100% - 92px);
+    height: calc(100% - 110px);
   }
 
 
@@ -216,7 +245,7 @@
 
   #impl-svg {
     display: block;
-    width: min(100%, 860px);
+    width: 100%;
     height: 170px;
     overflow: visible;
   }
@@ -267,30 +296,21 @@
   .ld-green { background: var(--green-bg); border-color: var(--green); }
 
   .controls {
-    position: fixed;
-    right: 16px;
-    top: 120px;
-    z-index: 20;
-    width: 205px;
-    background: rgba(255, 255, 255, .96);
+    display: grid;
+    grid-template-columns: repeat(4, auto) auto;
+    gap: 7px;
+    align-items: center;
+    background: var(--panel-soft);
     border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 13px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    box-shadow: 0 16px 35px rgba(15, 23, 42, .16);
-    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    padding: 7px;
+    margin-bottom: 10px;
+    width: fit-content;
+    max-width: 100%;
   }
 
   .controls::before {
-    content: "Control pași";
-    color: var(--muted);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: .8px;
-    font-weight: 800;
-    margin-bottom: 2px;
+    content: none;
   }
 
   button {
@@ -301,16 +321,16 @@
     border-radius: 9px;
     font-family: var(--font-ui);
     font-weight: 650;
-    font-size: 13px;
+    font-size: 12px;
     cursor: pointer;
-    transition: .15s ease;
-    width: 100%;
-    justify-content: center;
+    transition: none;
+    width: auto;
+    white-space: nowrap;
   }
 
   button:hover:not(:disabled) {
-    background: #eef2ff;
-    border-color: #93c5fd;
+    background: var(--panel);
+    border-color: var(--border);
   }
 
   button:disabled {
@@ -325,7 +345,7 @@
   }
 
   button.primary:hover:not(:disabled) {
-    background: #1e40af;
+    background: var(--blue);
   }
 
   button.danger {
@@ -334,18 +354,18 @@
   }
 
   button.danger:hover:not(:disabled) {
-    background: var(--red-bg);
-    border-color: #fca5a5;
+    background: var(--panel);
+    border-color: #fecaca;
   }
 
   .step-counter {
-    margin-left: 0;
+    margin-left: 6px;
     color: var(--muted);
     font-family: var(--font-mono);
     font-size: 11px;
     text-align: center;
-    padding-top: 6px;
-    border-top: 1px solid var(--border);
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
   }
 
   @media (max-width: 900px) {
@@ -359,15 +379,17 @@
       border-bottom: 1px solid var(--border);
     }
     .panel-impl { grid-column: auto; }
+    .controls {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      width: 100%;
+    }
     .step-counter {
-    margin-left: 0;
-    color: var(--muted);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-align: center;
-    padding-top: 6px;
-    border-top: 1px solid var(--border);
-  }
+      grid-column: 1 / -1;
+      border-left: none;
+      border-top: 1px solid var(--border);
+      padding-top: 6px;
+      margin-left: 0;
+    }
   }
 </style>
 </head>
@@ -392,8 +414,8 @@
     <div class="side-block">
       <div class="section-title">Observație logică</div>
       <p style="font-size:13px;line-height:1.55;color:var(--muted)">
-        Highlight-ul galben indică o clauză folosită pentru propagare / decizie forțată.
-        Highlight-ul roșu indică exact clauzele care produc conflictul curent.
+        Culoarea clauzelor este calculată după assignment-ul curent:
+        verde = satisfăcută, roșu = conflict/falsă, galben = clauză activă pentru propagare.
       </p>
     </div>
   </aside>
@@ -406,6 +428,14 @@
       </div>
     </div>
     <div class="step-box" id="step-desc">Apasă <strong>Pas următor</strong> pentru a începe demonstrația.</div>
+<div class="controls">
+  <button id="btn-prev">← Pas anterior</button>
+  <button id="btn-next" class="primary">Pas următor →</button>
+  <button id="btn-auto">▶ Auto play</button>
+  <button id="btn-reset" class="danger">↺ Reset</button>
+  <span class="step-counter" id="step-counter">Pas 0 / 14</span>
+</div>
+
     <div class="svg-card">
       <svg id="tree-svg" width="680" height="390" aria-label="Arbore DPLL"></svg>
     </div>
@@ -425,24 +455,17 @@
   <span class="legend-item"><span class="legend-dot ld-green"></span>SAT</span>
 </div>
 
-<div class="controls">
-  <button id="btn-prev">← Pas anterior</button>
-  <button id="btn-next" class="primary">Pas următor →</button>
-  <button id="btn-auto">▶ Auto play</button>
-  <button id="btn-reset" class="danger">↺ Reset</button>
-  <span class="step-counter" id="step-counter">Pas 0 / 14</span>
-</div>
 
 <script>
 const CLAUSES = [
-  { id:0, label:"(¬a ∨ b ∨ c)",   reason:"dacă a=1 și b=0, forțează c=1" },
-  { id:1, label:"(a ∨ c ∨ d)",    reason:"dacă a=0 și c=0, forțează d=1" },
-  { id:2, label:"(a ∨ c ∨ ¬d)",   reason:"dacă a=0 și c=0, forțează d=0" },
-  { id:3, label:"(a ∨ ¬c ∨ d)",   reason:"dacă a=0 și c=1, forțează d=1" },
-  { id:4, label:"(a ∨ ¬c ∨ ¬d)",  reason:"dacă a=0 și c=1, forțează d=0" },
-  { id:5, label:"(¬b ∨ ¬c ∨ d)",  reason:"dacă b=1 și c=1, forțează d=1" },
-  { id:6, label:"(¬a ∨ b ∨ ¬c)",  reason:"dacă a=1 și b=0, forțează c=0" },
-  { id:7, label:"(¬a ∨ ¬b ∨ c)",  reason:"dacă a=1 și b=1, forțează c=1" },
+  { id:0, lits:[-1, 2, 3], label:"(¬a ∨ b ∨ c)",   reason:"dacă a=1 și b=0, forțează c=1" },
+  { id:1, lits:[1, 3, 4],  label:"(a ∨ c ∨ d)",    reason:"dacă a=0 și c=0, forțează d=1" },
+  { id:2, lits:[1, 3, -4], label:"(a ∨ c ∨ ¬d)",   reason:"dacă a=0 și c=0, forțează d=0" },
+  { id:3, lits:[1, -3, 4], label:"(a ∨ ¬c ∨ d)",   reason:"dacă a=0 și c=1, forțează d=1" },
+  { id:4, lits:[1, -3, -4],label:"(a ∨ ¬c ∨ ¬d)",  reason:"dacă a=0 și c=1, forțează d=0" },
+  { id:5, lits:[-2, -3, 4],label:"(¬b ∨ ¬c ∨ d)",  reason:"dacă b=1 și c=1, forțează d=1" },
+  { id:6, lits:[-1, 2, -3],label:"(¬a ∨ b ∨ ¬c)",  reason:"dacă a=1 și b=0, forțează c=0" },
+  { id:7, lits:[-1, -2, 3],label:"(¬a ∨ ¬b ∨ c)",  reason:"dacă a=1 și b=1, forțează c=1" },
 ];
 
 const BASE_NODES = {
@@ -659,21 +682,58 @@ function buildClauseList() {
     const div = document.createElement("div");
     div.className = "clause";
     div.id = `clause-${cl.id}`;
-    div.innerHTML = `<strong>C${index + 1}</strong> ${cl.label}`;
     div.title = cl.reason;
     list.appendChild(div);
   });
 }
 
+const VAR_NAMES = {1:"a", 2:"b", 3:"c", 4:"d"};
+
+function litText(lit) {
+  const name = VAR_NAMES[Math.abs(lit)];
+  return lit < 0 ? "¬" + name : name;
+}
+
+function litValue(lit, vars) {
+  const item = vars[VAR_NAMES[Math.abs(lit)]];
+  if (!item || item.value === "0/1") return null;
+  const raw = item.value === 1;
+  return lit > 0 ? raw : !raw;
+}
+
+function clauseEval(clause, vars) {
+  const vals = clause.lits.map(lit => ({lit, value: litValue(lit, vars)}));
+  const trueCount = vals.filter(x => x.value === true).length;
+  const assignedCount = vals.filter(x => x.value !== null).length;
+  const sat = trueCount > 0;
+  const falseNow = assignedCount === vals.length && trueCount === 0;
+  return {vals, trueCount, assignedCount, sat, falseNow};
+}
+
 function highlightClauses(step) {
-  CLAUSES.forEach(cl => {
+  CLAUSES.forEach((cl, index) => {
     const el = document.getElementById(`clause-${cl.id}`);
+    const ev = clauseEval(cl, step.vars);
+    const isConflict = step.conflictClauses.includes(cl.id);
+    const isActive = step.activeClauses.includes(cl.id);
+
     el.className = "clause";
-    if (step.conflictClauses.includes(cl.id)) el.classList.add("conflict-clause");
-    else if (step.activeClauses.includes(cl.id)) {
-      if (step.nodes.some(n => n.status === "sat")) el.classList.add("sat-clause");
-      else el.classList.add("active");
-    }
+    if (isConflict || ev.falseNow) el.classList.add("conflict-clause");
+    else if (ev.sat) el.classList.add("sat-clause");
+    else if (isActive) el.classList.add("active");
+    else el.classList.add("partial-clause");
+
+    const litHtml = ev.vals.map(x => {
+      const cls = x.value === true ? "lit-ok" : x.value === false ? "lit-bad" : "";
+      return `<span class="${cls}">${litText(x.lit)}</span>`;
+    }).join(" ∨ ");
+
+    let status = "parțial";
+    if (isConflict || ev.falseNow) status = "conflict";
+    else if (ev.sat) status = "SAT";
+
+    el.innerHTML = `<strong>C${index + 1}</strong> (${litHtml})
+      <span class="clause-meta">${status} · lit. adevărați: ${ev.trueCount}/${cl.lits.length}</span>`;
   });
 }
 
