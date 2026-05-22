@@ -2,7 +2,7 @@
 
 ## Introducere
 
-Acest document analizează partea algoritmică a aplicației din proiectul `SATsolver`, pe baza codului activ al produsului, nu pe baza unor presupuneri teoretice externe. Au fost urmărite în special modulele din `app.py`, `sat_core/`, `solvers/`, `problems/` și `utils/`. Codul din `legacy/` nu este inclus în analiza de bază, deoarece fișierul `AGENTS.md` îl marchează explicit ca arhivă.
+Acest document analizează partea algoritmică a aplicației din proiectul `SATsolver`, pe baza codului activ al produsului, nu pe baza unor presupuneri teoretice externe. Au fost urmărite în special modulele din `app.py`, `sat_core/`, `solvers/`, `problems/` și `utils/`.
 
 Aplicația este o interfață desktop Tkinter pentru:
 
@@ -81,9 +81,8 @@ UI Tkinter
 ## 2.1 DPLL
 
 - Unde apare în cod:
-  - `solvers/dpll.py`, funcția `dpll` și varianta explicativă `dpll_debug`
-  - `solvers/solver_utils.py`, funcția `unit_propagate`
-  - `sat_core/solver_runner.py`, funcția `solve_clauses` apelează DPLL cu euristica `choose_variable_small_clause`
+  - `solvers/dpll.py`, funcția `dpll`
+  - `sat_core/solver_runner.py`, funcția `solve_clauses` apelează DPLL prin interfața comună de solver
 - Rol în aplicație:
   - solver SAT exact, folosit ca bază clasică și termen de comparație.
 - Explicație teoretică:
@@ -116,18 +115,17 @@ UI Tkinter
 
 ### Observații tehnice importante
 
-1. Propagarea unitară este externalizată în `solvers/solver_utils.py:66-117`.
-2. DPLL din aplicație folosește, în rularea normală, `choose_variable_small_clause`, nu varianta trivială `choose_variable_basic` (`sat_core/solver_runner.py:73-94`).
-3. Solverul colectează și statistici: decizii, propagări, conflicte, timp (`solvers/dpll.py:103-167`).
+1. Propagarea unitară este implementată direct în `solvers/dpll.py`, pentru ca solverul activ să fie autonom.
+2. DPLL folosește implicit o alegere de variabilă orientată spre clauze mici, fără un modul separat de euristici expus în UI.
+3. Solverul colectează și statistici: decizii, propagări, conflicte, timp (`solvers/dpll.py`).
 
 ---
 
 ## 2.2 Unit Propagation
 
 - Unde apare în cod:
-  - `solvers/solver_utils.py:66-117`, funcția `unit_propagate`
-  - `solvers/solver_utils.py:3-64`, `unit_propagate_debug`
-  - folosită direct în `solvers/dpll.py:178-196`
+  - `solvers/dpll.py`, funcția internă `_unit_propagate`
+  - folosită direct în solverul DPLL activ
 - Rol în aplicație:
   - reduce formula și deduce forțări logice înainte de ramificare.
 - Explicație teoretică:
@@ -350,7 +348,7 @@ UI Tkinter
 
 - Unde apare în cod:
   - `problems/graph_coloring.py:63-77`
-  - `utils/colored_graph.py:67-98`
+  - `utils/graph_utils.py`, `generate_coloring_clauses`
 - Rol în aplicație:
   - decide dacă un graf este `k-colorabil`.
 - Explicație teoretică:
@@ -518,7 +516,7 @@ UI Tkinter
 ## 3.1 Generarea de grafuri aleatoare `G(n,p)`
 
 - Unde apare:
-  - `utils/colored_graph.py:26-40`, `generate_random_graph`
+  - `utils/graph_utils.py`, `generate_random_graph`
 - Rol:
   - generează grafuri prin model Erdős-Rényi.
 - Explicație:
@@ -531,7 +529,7 @@ UI Tkinter
 ## 3.2 Generarea de grafuri cu număr exact de muchii `G(n,m)`
 
 - Unde apare:
-  - `utils/colored_graph.py:43-61`, `generate_random_graph_exact_edges`
+  - `utils/graph_utils.py`, `generate_random_graph_exact_edges`
 - Rol:
   - produce instanțe controlate după numărul exact de muchii.
 - Explicație:
@@ -565,35 +563,7 @@ UI Tkinter
 - Tip:
   - infrastructură standard, nu algoritm de căutare.
 
-## 3.5 Backtracking nativ pentru colorare
-
-- Unde apare:
-  - `utils/colored_graph.py:117-145`, `solve_coloring_native`
-- Rol:
-  - solver clasic de colorare, separat de fluxul SAT.
-- Explicație:
-  - atribuie culori pe rând și revine când găsește conflict.
-- Complexitate:
-  - exponențială, aproximativ `O(k^n)`.
-- Tip:
-  - algoritm exact auxiliar.
-
-## 3.6 Backtracking optimizat pentru colorare
-
-- Unde apare:
-  - `utils/colored_graph.py:148-198`, `solve_coloring_native_optimised`
-- Rol:
-  - variantă mai inteligentă a solverului nativ.
-- Explicație:
-  - introduce:
-    1. selecția nodului cu cele mai puține opțiuni rămase;
-    2. un test de forward checking.
-- Observație:
-  - funcția conține expresia `forward_check and backtrack()`, care verifică obiectul-funcție și nu apelează `forward_check()`. Teoretic intenția este clară, dar practic verificarea anticipativă nu este aplicată cum sugerează numele.
-- Tip:
-  - algoritm exact auxiliar cu euristici.
-
-## 3.7 Backtracking nativ pentru Sudoku
+## 3.5 Backtracking nativ pentru Sudoku
 
 - Unde apare:
   - `utils/sudoku_general.py:110-163`, `solve_sudoku`
@@ -612,34 +582,15 @@ UI Tkinter
 
 ## 4.1 Euristici de alegere a variabilei în DPLL
 
-### a) First unassigned / prima variabilă întâlnită
+### Small-clause preference
 
 - Unde apare:
-  - `solvers/heuristics.py:2-12`, `choose_variable_basic`
-- Rol:
-  - variantă simplă, utilă pentru debug.
-- Tip:
-  - euristică.
-
-### b) Small-clause preference
-
-- Unde apare:
-  - `solvers/heuristics.py:30-37`, `choose_variable_small_clause`
-  - utilizată efectiv în `sat_core/solver_runner.py:83-94`
+  - `solvers/dpll.py`, funcția internă `_choose_variable_small_clause`
+  - utilizată implicit de DPLL
 - Explicație:
   - sortează clauzele după lungime și alege o variabilă dintr-o clauză mică.
 - Semnificație teoretică:
   - clauzele mici sunt mai restrictive; ramificarea în jurul lor tinde să detecteze mai repede conflictele.
-- Tip:
-  - euristică.
-
-### c) Most frequent
-
-- Unde apare:
-  - `solvers/heuristics.py:16-25`, `choose_variable_smart`
-  - analog și în CDCL, `solvers/cdcl.py:605-612`
-- Explicație:
-  - alege variabila care apare cel mai des.
 - Tip:
   - euristică.
 
@@ -727,25 +678,7 @@ UI Tkinter
 - Tip:
   - euristică locală de optimizare.
 
-<!-- ## 4.10 MRV-like în colorarea nativă
-
-- Unde apare:
-  - `utils/colored_graph.py:153-165`, `select_unassigned`
-- Explicație:
-  - alege nodul necolorat cu cele mai puține culori disponibile.
-- Tip:
-  - euristică. -->
-
-<!-- ## 4.11 Forward checking
-
-- Unde apare:
-  - `utils/colored_graph.py:167-172`
-- Explicație:
-  - verifică dacă vreun nod rămas fără culoare posibilă invalidează imediat ramura curentă.
-- Tip:
-  - optimizare de pruning. -->
-
-## 4.12 Planted assignment pentru generare SAT
+## 4.10 Planted assignment pentru generare SAT
 
 - Unde apare:
   - `problems/random_3sat.py:77-91`
@@ -754,7 +687,7 @@ UI Tkinter
 - Tip:
   - metodă constructivă de generare.
 
-## 4.13 Forced UNSAT core
+## 4.11 Forced UNSAT core
 
 - Unde apare:
   - `problems/random_3sat.py:31-42`, `83-85`
@@ -778,7 +711,7 @@ UI Tkinter
 | `reasons` | `solvers/cdcl.py:241` | clauza care a forțat o propagare |
 | `activity` | `solvers/cdcl.py:243` | scor VSIDS-like |
 | `_UnsatisfiedTracker` | `solvers/walksat.py:41-130` | actualizare incrementală a clauzelor nesatisfăcute |
-| `Graph = dict[int, list[int]]` | `problems/*`, `utils/colored_graph.py` | listă de adiacență pentru grafuri |
+| `Graph = dict[int, list[int]]` | `problems/*`, `utils/graph_utils.py` | listă de adiacență pentru grafuri |
 | `ProblemInstance` | `sat_core/models.py:10-37` | ambalaj unificat: CNF, metadata, decoder |
 | `SolveResult` | `sat_core/models.py:40-49` | rezultat standardizat al solverului |
 | `BenchmarkRow` | `sat_core/models.py:52-96` | unitate de măsurare experimentală |
@@ -829,12 +762,12 @@ Acesta este unul dintre cele mai importante concepte explicabile în raport, pen
 
 <!-- ## 6.4 Clamp la graf complet
 
-- `utils/colored_graph.py:49-53`
+- `utils/graph_utils.py`
 - dacă se cer prea multe muchii, aplicația nu produce eroare, ci limitează la numărul maxim posibil.
 - Tip:
   - regulă practică de robustețe. -->
 
-## 6.5 Cooperative cancellation / timeout / skip
+## 6.4 Cooperative cancellation / timeout / skip
 
 - `sat_core/runtime.py`
 - nu ține direct de teoria SAT, dar este o strategie importantă de control al execuției în aplicație.
@@ -983,10 +916,9 @@ Aceste sugestii nu descriu comportament existent, ci extensii posibile.
    - pure literal elimination;
    - subsumption;
    - clause strengthening.
-4. Corectarea și activarea reală a `forward_check()` în `solve_coloring_native_optimised`.
-5. Adăugarea unei secțiuni vizuale despre graful de implicație din CDCL și clauzele învățate.
-6. Măsurarea memoriei, nu doar a timpului, în benchmark.
-7. Adăugarea unor experimente pe pragul de fază pentru Random 3-SAT în jurul raportului clauze/variabile cunoscut din literatură.
+4. Adăugarea unei secțiuni vizuale despre graful de implicație din CDCL și clauzele învățate.
+5. Măsurarea memoriei, nu doar a timpului, în benchmark.
+6. Adăugarea unor experimente pe pragul de fază pentru Random 3-SAT în jurul raportului clauze/variabile cunoscut din literatură.
 
 ---
 

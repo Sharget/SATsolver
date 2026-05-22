@@ -184,9 +184,9 @@ Solve a DIMACS file directly from Python:
 
 ```python
 from solvers.cdcl import cdcl
-from utils.dimacs import read_dimacs_cnf
+from sat_core.dimacs import load_dimacs
 
-clauses = read_dimacs_cnf("input/examples/graph_coloring/gc_n10_p10_k2.cnf")
+clauses = load_dimacs("input/examples/graph_coloring/gc_n10_p10_k2.cnf")
 solution, stats = cdcl(clauses, return_stats=True)
 
 print(solution)

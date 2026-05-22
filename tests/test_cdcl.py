@@ -3,7 +3,7 @@ import unittest
 from solvers.cdcl import Clause, cdcl, clause_lbd, learned_clause_delete_key, learned_clauses_to_delete
 from solvers.dpll import dpll
 from problems.n_queens import n_queens_problem
-from utils.dimacs import read_dimacs_cnf
+from sat_core.dimacs import load_dimacs
 from utils.general_utils import color_var, sudoku_var
 from utils.sudoku_general import generate_sudoku_clauses
 
@@ -104,7 +104,7 @@ class CDCLTests(unittest.TestCase):
         self.assertGreaterEqual(stats["learned_clauses"], 1)
 
     def test_graph_coloring_dimacs_matches_dpll(self):
-        formula = read_dimacs_cnf("input/examples/graph_coloring/gc_n10_p10_k2.cnf")
+        formula = load_dimacs("input/examples/graph_coloring/gc_n10_p10_k2.cnf")
         cdcl_solution = cdcl(formula)
         dpll_solution = dpll(formula)
 

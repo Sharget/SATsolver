@@ -1,82 +1,57 @@
+from __future__ import annotations
+
 import time
 
-from utils.general_utils import indent
-from solvers.solver_utils import unit_propagate_debug, unit_propagate
-from solvers.heuristics import choose_variable_basic
 from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requested
-import utils.colored_text as txt
 
 
-def _cancel_requested(cancel_token):
-    return stop_requested(cancel_token)
+def _unit_propagate(clauses, assignment):
+    changed = True
 
+    while changed:
+        changed = False
 
-def dpll_debug(clauses, assignment=None, level=0, choose_var_fn=None):
-    """
-    Return a satisfying assignment dict when SAT, otherwise None.
-    Prints the recursive search steps for manual debugging.
-    """
-    if assignment is None:
-        assignment = {}
-
-    if choose_var_fn is None:
-        choose_var_fn = choose_variable_basic
-
-    print(indent(level) + txt.BOLD + txt.CYAN + "Entering DPLL" + txt.RESET)
-
-    result = unit_propagate_debug(clauses, assignment.copy())
-
-    if result is None:
-        print(indent(level) + txt.RED + "Conflict after propagation -> BACKTRACK" + txt.RESET)
-        return None
-
-    clauses, assignment = result
-
-    print("\n" + "-" * level + "-" * txt.separator_lenght)
-    print(indent(level) + txt.BLUE + f"Clauses: {clauses}" + txt.RESET)
-    print(indent(level) + txt.GREEN + f"Assignment: {assignment}" + txt.RESET)
-    print("-" * level + "-" * txt.separator_lenght)
-
-    if not clauses:
-        print(txt.BOLD + txt.RED + f"level = {level}" + txt.RESET)
-        print(indent(level) + txt.GREEN + "SAT FOUND" + txt.RESET)
-        return assignment
-
-    var = choose_var_fn(clauses, assignment)
-    print(indent(level) + txt.YELLOW + f"Choose variable: {var}" + txt.RESET)
-
-    for value in [True, False]:
-        print(indent(level) + txt.CYAN + f"Trying {var} = {value}" + txt.RESET)
-
-        new_assignment = assignment.copy()
-        new_assignment[var] = value
-
-        lit = var if value else -var
-        new_clauses = []
-
-        for c in clauses:
-            if lit in c:
+        for clause in clauses:
+            if len(clause) != 1:
                 continue
 
-            if -lit in c:
-                new_c = [x for x in c if x != -lit]
+            lit = clause[0]
+            var = abs(lit)
+            value = lit > 0
 
-                if not new_c:
-                    print(indent(level) + txt.RED + "Empty clause -> conflict" + txt.RESET)
-                    break
+            if var in assignment:
+                if assignment[var] != value:
+                    return None
+                continue
 
-                new_clauses.append(new_c)
-            else:
-                new_clauses.append(c)
+            assignment[var] = value
+            changed = True
+            new_clauses = []
 
-        else:
-            result = dpll_debug(new_clauses, new_assignment, level + 1, choose_var_fn)
+            for current in clauses:
+                if lit in current:
+                    continue
 
-            if result is not None:
-                return result
+                if -lit in current:
+                    new_clause = [item for item in current if item != -lit]
+                    if not new_clause:
+                        return None
+                    new_clauses.append(new_clause)
+                else:
+                    new_clauses.append(current)
 
-        print(indent(level) + txt.RED + f"Backtracking on {var} = {value}" + txt.RESET)
+            clauses = new_clauses
+            break
 
+    return clauses, assignment
+
+
+def _choose_variable_small_clause(clauses, assignment):
+    for clause in sorted(clauses, key=len):
+        for lit in clause:
+            var = abs(lit)
+            if var not in assignment:
+                return var
     return None
 
 
@@ -166,17 +141,16 @@ def dpll(
             ),
         )
 
-    if _cancel_requested(cancel_token):
+    if stop_requested(cancel_token):
         return finish(None, cancellation_status(cancel_token))
 
     if assignment is None:
         assignment = {}
 
-    if choose_var_fn is None:
-        choose_var_fn = choose_variable_basic
+    choose_var_fn = choose_var_fn or _choose_variable_small_clause
 
     before_propagation = len(assignment)
-    result = unit_propagate(clauses, assignment.copy())
+    result = _unit_propagate(clauses, assignment.copy())
 
     if result is None:
         _stats["conflicts"] += 1
@@ -184,7 +158,7 @@ def dpll(
         log_progress()
         return finish(None, "UNSAT")
 
-    if _cancel_requested(cancel_token):
+    if stop_requested(cancel_token):
         return finish(None, cancellation_status(cancel_token))
 
     clauses, assignment = result
@@ -205,8 +179,8 @@ def dpll(
     log_debug(f"choose variable {var}")
     log_progress()
 
-    for value in [True, False]:
-        if _cancel_requested(cancel_token):
+    for value in (True, False):
+        if stop_requested(cancel_token):
             return finish(None, cancellation_status(cancel_token))
 
         new_assignment = assignment.copy()
@@ -217,23 +191,23 @@ def dpll(
         new_clauses = []
         branch_conflict = False
 
-        for c in clauses:
-            if lit in c:
+        for clause in clauses:
+            if lit in clause:
                 continue
 
-            if -lit in c:
-                new_c = [x for x in c if x != -lit]
+            if -lit in clause:
+                new_clause = [item for item in clause if item != -lit]
 
-                if not new_c:
+                if not new_clause:
                     branch_conflict = True
                     _stats["conflicts"] += 1
                     log_debug(f"empty clause after {var}={value}")
                     log_progress()
                     break
 
-                new_clauses.append(new_c)
+                new_clauses.append(new_clause)
             else:
-                new_clauses.append(c)
+                new_clauses.append(clause)
 
         if not branch_conflict:
             result = dpll(
@@ -249,7 +223,7 @@ def dpll(
                 _level=_level + 1,
             )
 
-            if _cancel_requested(cancel_token):
+            if stop_requested(cancel_token):
                 return finish(None, cancellation_status(cancel_token))
 
             if result is not None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 
 from sat_core.models import ProblemInstance
-from utils.colored_graph import (
+from utils.graph_utils import (
     decode_coloring,
     generate_coloring_clauses,
     generate_random_graph,

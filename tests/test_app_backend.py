@@ -1,9 +1,12 @@
+import csv
+import tempfile
 import unittest
 import time
 import tkinter as tk
 import random
 
 import app as app_module
+import sat_core.random_3sat_presets as random_3sat_presets_module
 from app import BENCHMARK_PROBLEMS, PROBLEM_KINDS, SATApp, SUDOKU_SIZES
 from problems.clique import (
     average_degree_clique_problem,
@@ -26,14 +29,43 @@ from problems.independent_set import independent_var, manual_independent_set_pro
 from problems.n_queens import n_queens_problem, n_queens_var
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
-from sat_core.benchmark import graph_coloring_sweep, result_to_row, run_clique_sweep, run_graph_suite_sweep, run_random_3sat_sweep
+from sat_core.benchmark import (
+    RANDOM_3SAT_CSV_HEADERS,
+    RANDOM_3SAT_PRESET_A,
+    RANDOM_3SAT_PRESET_B,
+    RANDOM_3SAT_PRESET_C,
+    _random_3sat_preset_skip,
+    _random_3sat_preset_timeout,
+    graph_coloring_sweep,
+    random_3sat_csv_row,
+    random_3sat_preset_case_count,
+    random_3sat_preset_cases,
+    random_3sat_preset_default_solvers,
+    result_to_row,
+    run_clique_sweep,
+    run_graph_suite_sweep,
+    run_random_3sat_sweep,
+    write_random_3sat_benchmark_csv,
+)
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
 from sat_core.models import BenchmarkRow, ProblemInstance, SolveResult
 from sat_core.process_workers import problem_from_snapshot
+from sat_core.random_3sat_presets import (
+    Random3SATPreset,
+    Random3SATPresetSpec,
+    Random3SATPresetUiValues,
+    matrix_cases,
+    random_3sat_preset_names,
+    random_3sat_preset_should_skip_solver,
+    random_3sat_preset_summary,
+    random_3sat_preset_solver_timeout,
+    random_3sat_preset_ui_values,
+    register_random_3sat_preset,
+)
 from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_ROW, RunEvent, RunToken
-from sat_core.solver_runner import SOLVERS, solve_problem
+from sat_core.solver_runner import SOLVERS, solve_clauses, solve_problem
 from utils.general_utils import color_var, sudoku_var
-from utils.colored_graph import decode_coloring, generate_random_graph_exact_edges, graph_edges
+from utils.graph_utils import decode_coloring, generate_random_graph_exact_edges, graph_edges
 
 
 class AppBackendTests(unittest.TestCase):
@@ -279,6 +311,240 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(rows[0].problem_metadata["selected_mode"], "Planted SAT")
         self.assertEqual(rows[0].problem_metadata["sat_percentage"], 100.0)
 
+    def test_random_3sat_sweep_reuses_generated_instance_for_solvers(self):
+        rows = run_random_3sat_sweep(
+            [5],
+            [2.0],
+            ["CDCL", "ProbSAT"],
+            repeats=1,
+            seed=11,
+            formula_mode="Planted SAT",
+            logging_options={"walksat_max_tries": 1, "walksat_max_flips": 1},
+        )
+
+        self.assertEqual([row.solver for row in rows], ["CDCL", "ProbSAT"])
+        self.assertEqual(rows[0].problem_clauses, rows[1].problem_clauses)
+        self.assertEqual(rows[0].problem_metadata["seed"], rows[1].problem_metadata["seed"])
+
+    def test_random_3sat_preset_case_counts_and_seed_ranges(self):
+        self.assertEqual(
+            random_3sat_preset_names()[:4],
+            ("Custom", RANDOM_3SAT_PRESET_A, RANDOM_3SAT_PRESET_B, RANDOM_3SAT_PRESET_C),
+        )
+        self.assertEqual(random_3sat_preset_case_count(RANDOM_3SAT_PRESET_A), 350)
+        self.assertEqual(random_3sat_preset_case_count(RANDOM_3SAT_PRESET_B), 100)
+        self.assertEqual(random_3sat_preset_case_count(RANDOM_3SAT_PRESET_C), 270)
+        self.assertEqual(random_3sat_preset_default_solvers(RANDOM_3SAT_PRESET_A), ("CDCL", "DPLL", "WalkSAT", "ProbSAT"))
+        self.assertEqual(random_3sat_preset_default_solvers(RANDOM_3SAT_PRESET_B), ("CDCL", "DPLL"))
+
+        preset_a_cases = random_3sat_preset_cases(RANDOM_3SAT_PRESET_A)
+        seeds_for_200 = {
+            case["seed"]
+            for case in preset_a_cases
+            if case["variable_count"] == 200
+        }
+        seeds_for_300 = {
+            case["seed"]
+            for case in preset_a_cases
+            if case["variable_count"] == 300
+        }
+        ratios_for_300 = {
+            case["ratio"]
+            for case in preset_a_cases
+            if case["variable_count"] == 300
+        }
+        self.assertEqual(max(seeds_for_200), 20)
+        self.assertEqual(min(seeds_for_200), 1)
+        self.assertEqual(max(seeds_for_300), 10)
+        self.assertEqual(min(seeds_for_300), 1)
+        self.assertEqual(ratios_for_300, {3.5, 4.25, 5.5})
+
+        preset_b_cases = random_3sat_preset_cases(RANDOM_3SAT_PRESET_B)
+        ratios_for_150 = {
+            case["ratio"]
+            for case in preset_b_cases
+            if case["variable_count"] == 150
+        }
+        ratios_for_200 = {
+            case["ratio"]
+            for case in preset_b_cases
+            if case["variable_count"] == 200
+        }
+        self.assertEqual(ratios_for_150, {4.25, 5.5})
+        self.assertEqual(ratios_for_200, {4.25, 5.5})
+
+        preset_c_fractions = {
+            case["sat_fraction"]
+            for case in random_3sat_preset_cases(RANDOM_3SAT_PRESET_C)
+        }
+        self.assertEqual(preset_c_fractions, {0.3, 0.5, 0.7})
+
+    def test_random_3sat_preset_registry_accepts_programmatic_presets(self):
+        preset_name = "Preset Test: Tiny Registry SAT"
+        register_random_3sat_preset(
+            Random3SATPreset(
+                name=preset_name,
+                spec=Random3SATPresetSpec(
+                    variables=(4, 5),
+                    ratios=(2.0,),
+                    seeds=range(1, 3),
+                    formula_mode="Planted SAT",
+                ),
+                default_solvers=("CDCL", "ProbSAT"),
+                ui_values=Random3SATPresetUiValues(
+                    variables="4,5",
+                    ratios="2.0",
+                    seed="1",
+                    formula_mode="Planted SAT",
+                    sat_percentage="",
+                ),
+                summary="Tiny registry test preset.",
+            )
+        )
+
+        cases = random_3sat_preset_cases(preset_name)
+        self.assertIn(preset_name, random_3sat_preset_names())
+        self.assertEqual(len(cases), 4)
+        self.assertEqual(cases[0]["variable_count"], 4)
+        self.assertEqual(cases[0]["clause_count"], 8)
+        self.assertEqual(cases[0]["sat_fraction"], 1.0)
+        self.assertEqual(random_3sat_preset_default_solvers(preset_name), ("CDCL", "ProbSAT"))
+        self.assertEqual(random_3sat_preset_ui_values(preset_name).variables, "4,5")
+        self.assertEqual(random_3sat_preset_summary(preset_name), "Tiny registry test preset.")
+
+    def test_random_3sat_matrix_cases_support_mixed_sat_fractions(self):
+        cases = matrix_cases(
+            Random3SATPresetSpec(
+                variables=(10,),
+                ratios=(4.25,),
+                seeds=range(1, 3),
+                formula_mode="Random",
+                sat_fractions=(0.25, 0.75),
+            )
+        )
+
+        self.assertEqual(len(cases), 4)
+        self.assertEqual({case.sat_percentage for case in cases}, {25.0, 75.0})
+        self.assertEqual({case.sat_fraction for case in cases}, {0.25, 0.75})
+
+    def test_random_3sat_matrix_cases_support_ratios_by_variable_count(self):
+        cases = matrix_cases(
+            Random3SATPresetSpec(
+                variables=(100, 300),
+                ratios=lambda n_vars: (3.5, 4.25, 5.5) if n_vars == 300 else (2.5, 3.5, 4.25, 5.5),
+                seeds=range(1, 2),
+                formula_mode="Planted SAT",
+            )
+        )
+
+        ratios_by_n = {}
+        for case in cases:
+            ratios_by_n.setdefault(case.variable_count, set()).add(case.ratio)
+        self.assertEqual(ratios_by_n[100], {2.5, 3.5, 4.25, 5.5})
+        self.assertEqual(ratios_by_n[300], {3.5, 4.25, 5.5})
+
+    def test_random_3sat_unknown_preset_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            random_3sat_preset_cases("Preset X: Missing")
+        with self.assertRaises(ValueError):
+            random_3sat_preset_default_solvers("Preset X: Missing")
+        with self.assertRaises(ValueError):
+            random_3sat_preset_ui_values("Preset X: Missing")
+
+    def test_random_3sat_preset_caps_large_dpll_timeout(self):
+        small_problem = ProblemInstance("small", "Random 3-SAT", [[1]], metadata={"variables": 100})
+        large_problem = ProblemInstance("large", "Random 3-SAT", [[1]], metadata={"variables": 200})
+        forced_150_problem = ProblemInstance(
+            "forced",
+            "Random 3-SAT",
+            [[1]],
+            metadata={"variables": 150, "preset": RANDOM_3SAT_PRESET_B},
+        )
+        forced_200_problem = ProblemInstance(
+            "forced large",
+            "Random 3-SAT",
+            [[1]],
+            metadata={"variables": 200, "preset": RANDOM_3SAT_PRESET_B},
+        )
+
+        self.assertEqual(_random_3sat_preset_timeout("DPLL", large_problem, 30.0), 10.0)
+        self.assertEqual(_random_3sat_preset_timeout("DPLL", large_problem, None), 10.0)
+        self.assertEqual(_random_3sat_preset_timeout("DPLL", small_problem, 30.0), 30.0)
+        self.assertEqual(_random_3sat_preset_timeout("CDCL", large_problem, 30.0), 30.0)
+        self.assertEqual(_random_3sat_preset_timeout("DPLL", forced_150_problem, 30.0), 10.0)
+        self.assertFalse(_random_3sat_preset_skip("DPLL", forced_150_problem))
+        self.assertTrue(_random_3sat_preset_skip("DPLL", forced_200_problem))
+
+    def test_random_3sat_preset_solver_policy_knobs(self):
+        original_cap_min = random_3sat_presets_module.DPLL_TIMEOUT_CAP_MIN_VARIABLES
+        original_cap_seconds = random_3sat_presets_module.DPLL_TIMEOUT_CAP_SECONDS
+        original_skip_above = random_3sat_presets_module.DPLL_SKIP_ABOVE_VARIABLES
+        try:
+            random_3sat_presets_module.DPLL_TIMEOUT_CAP_MIN_VARIABLES = 150
+            random_3sat_presets_module.DPLL_TIMEOUT_CAP_SECONDS = 4.0
+            random_3sat_presets_module.DPLL_SKIP_ABOVE_VARIABLES = 200
+
+            self.assertEqual(random_3sat_preset_solver_timeout("DPLL", 150, 30.0), 4.0)
+            self.assertEqual(random_3sat_preset_solver_timeout("CDCL", 150, 30.0), 30.0)
+            self.assertFalse(random_3sat_preset_should_skip_solver("DPLL", 200))
+            self.assertTrue(random_3sat_preset_should_skip_solver("DPLL", 201))
+            self.assertFalse(random_3sat_preset_should_skip_solver("CDCL", 300))
+        finally:
+            random_3sat_presets_module.DPLL_TIMEOUT_CAP_MIN_VARIABLES = original_cap_min
+            random_3sat_presets_module.DPLL_TIMEOUT_CAP_SECONDS = original_cap_seconds
+            random_3sat_presets_module.DPLL_SKIP_ABOVE_VARIABLES = original_skip_above
+
+    def test_probsat_solver_alias_uses_walksat_strategy_and_label(self):
+        result = solve_clauses(
+            [[1, 2, 3], [-1, -2, -3]],
+            "ProbSAT",
+            logging_options={"walksat_max_tries": 1, "walksat_max_flips": 10, "walksat_selection_mode": "walksat"},
+        )
+
+        self.assertEqual(result.solver, "ProbSAT")
+        self.assertIn(result.status, ("SAT", "UNKNOWN"))
+        self.assertIn("strategy=probsat", result.stats["solver_options"])
+
+    def test_random_3sat_csv_export_uses_dedicated_headers_and_stats(self):
+        row = BenchmarkRow(
+            "Random 3-SAT n10_m42",
+            "Random 3-SAT",
+            "ProbSAT",
+            "UNKNOWN",
+            0.25,
+            42,
+            10,
+            7,
+            decisions="-",
+            conflicts="-",
+            propagations="-",
+            learned_clauses="-",
+            seed=7,
+            problem_metadata={
+                "mode": "Random",
+                "variables": 10,
+                "ratio": 4.25,
+                "clauses_requested": 42,
+                "seed": 7,
+                "sat_percentage": 50.0,
+            },
+            flips=100,
+            tries=2,
+            best_unsatisfied=1,
+            timeout=30.0,
+        )
+
+        self.assertEqual(random_3sat_csv_row(row)[0:7], ["Random", 10, 4.25, 42, 0.5, 7, "ProbSAT"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = f"{tmpdir}/random_3sat.csv"
+            write_random_3sat_benchmark_csv(path, [row])
+            with open(path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+
+        self.assertEqual(rows[0], RANDOM_3SAT_CSV_HEADERS)
+        self.assertEqual(rows[1][0:7], ["Random", "10", "4.25", "42", "0.5", "7", "ProbSAT"])
+        self.assertEqual(rows[1][-4:], ["100", "2", "1", "30.0"])
+
     def test_clique_benchmark_sweep_rows(self):
         rows = run_clique_sweep([3], [1.0], [3], ["CDCL"], repeats=1, seed=7)
 
@@ -517,6 +783,11 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(options["walksat_selection_mode"], "walksat")
         self.assertFalse(options["walksat_adaptive_noise"])
         self.assertIsNone(options["walksat_random_seed"])
+        self.assertEqual(options["probsat_max_tries"], 10)
+        self.assertEqual(options["probsat_max_flips"], 10000)
+        self.assertEqual(options["probsat_noise"], 0.5)
+        self.assertFalse(options["probsat_adaptive_noise"])
+        self.assertIsNone(options["probsat_random_seed"])
 
     def test_walksat_option_form_builder(self):
         app = SATApp.__new__(SATApp)
@@ -538,6 +809,32 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(options["walksat_selection_mode"], "probsat")
         self.assertTrue(options["walksat_adaptive_noise"])
         self.assertEqual(options["walksat_random_seed"], 9)
+
+    def test_probsat_benchmark_option_form_builder(self):
+        app = SATApp.__new__(SATApp)
+
+        options = app._logging_options(
+            False,
+            "Periodic progress",
+            walksat_max_tries="3",
+            walksat_max_flips="40",
+            walksat_noise="0.25",
+            walksat_selection_mode="Classic WalkSAT",
+            walksat_adaptive_noise=False,
+            walksat_random_seed="9",
+            probsat_max_tries="4",
+            probsat_max_flips="80",
+            probsat_noise="0.15",
+            probsat_adaptive_noise=True,
+            probsat_random_seed="11",
+        )
+
+        self.assertEqual(options["walksat_selection_mode"], "walksat")
+        self.assertEqual(options["probsat_max_tries"], 4)
+        self.assertEqual(options["probsat_max_flips"], 80)
+        self.assertEqual(options["probsat_noise"], 0.15)
+        self.assertTrue(options["probsat_adaptive_noise"])
+        self.assertEqual(options["probsat_random_seed"], 11)
 
     def test_walksat_solve_result_shows_reason_and_final_noise(self):
         app = SATApp.__new__(SATApp)
@@ -784,19 +1081,29 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("Clique", BENCHMARK_PROBLEMS)
             self.assertIn("Graph Suite", BENCHMARK_PROBLEMS)
             self.assertIn("WalkSAT", SOLVERS)
+            self.assertIn("ProbSAT", SOLVERS)
             self.assertIn("WalkSAT", app.solve_solver_guide.guide_text)
             self.assertIn("UNKNOWN", app.solve_solver_guide.guide_text)
             self.assertIn("WalkSAT", app.benchmark_solver_guide.guide_text)
             self.assertFalse(app.bench_walksat.get())
+            self.assertFalse(app.bench_probsat.get())
             self.assertEqual(str(app.solve_cdcl_options_frame.cget("text")), "CDCL Options")
             self.assertEqual(str(app.benchmark_cdcl_options_frame.cget("text")), "CDCL Options")
             self.assertEqual(str(app.solve_walksat_options_frame.cget("text")), "WalkSAT Options")
             self.assertEqual(str(app.benchmark_walksat_options_frame.cget("text")), "WalkSAT Options")
+            self.assertEqual(str(app.benchmark_probsat_options_frame.cget("text")), "ProbSAT Options")
+            self.assertEqual(
+                sum(1 for child in app.benchmark_walksat_options_frame.winfo_children() if isinstance(child, app_module.ttk.Combobox)),
+                0,
+            )
+            self.assertTrue(hasattr(app, "solve_result_pane"))
+            self.assertTrue(hasattr(app, "benchmark_results_pane"))
             self.assertIn("+ Generate", str(app.generate_button.cget("text")))
             self.assertIn("> Solve", str(app.solve_button.cget("text")))
             self.assertIn("x Cancel", str(app.solve_toolbar_cancel_button.cget("text")))
             self.assertIn("@ Refresh Chart", str(app.refresh_chart_button.cget("text")))
             self.assertIn("Export CSV", str(app.export_csv_button.cget("text")))
+            self.assertIn("Export 3-SAT CSV", str(app.export_3sat_csv_button.cget("text")))
             self.assertEqual(str(app.chart_metric_box.cget("state")), "readonly")
             self.assertEqual(str(app.chart_view_box.cget("state")), "readonly")
             self.assertTrue(app.root.bind("<Control-w>"))
@@ -896,6 +1203,7 @@ class AppBackendTests(unittest.TestCase):
             app.bench_problem.set("Random 3-SAT")
             app._refresh_benchmark_form()
             self.assertEqual(app.benchmark_description.get(), "Generate random 3-literal clauses as planted SAT, forced UNSAT, pure random, or a SAT/UNSAT mix.")
+            self.assertEqual(app.bench_3sat_preset.get(), "Custom")
             self.assertEqual(app.bench_3sat_variables.get(), "20,50,100")
             self.assertEqual(app.bench_3sat_mode.get(), "Planted SAT")
             self.assertEqual(app.bench_3sat_sat_percentage.get(), "50")
@@ -903,6 +1211,16 @@ class AppBackendTests(unittest.TestCase):
             app.bench_3sat_mode.set("Random")
             app._refresh_benchmark_random_3sat_controls()
             self.assertEqual(str(app.bench_3sat_sat_percentage_entry.cget("state")), "normal")
+            app.bench_3sat_preset.set("Preset A: Planted SAT")
+            app._apply_random_3sat_preset()
+            self.assertEqual(app.bench_3sat_variables.get(), "50,100,150,200,300")
+            self.assertEqual(app.bench_3sat_ratios.get(), "2.5,3.5,4.25,5.5")
+            self.assertTrue(app.bench_probsat.get())
+            self.assertEqual(str(app.bench_3sat_variables_entry.cget("state")), "disabled")
+            self.assertIn("350 cases", app.bench_3sat_preset_summary.get())
+            app.bench_3sat_preset.set("Custom")
+            app._apply_random_3sat_preset()
+            self.assertEqual(str(app.bench_3sat_variables_entry.cget("state")), "normal")
             app.bench_problem.set("Clique")
             app._refresh_benchmark_form()
             self.assertIn("targets", app.bench_graph_field_entries)
@@ -1333,6 +1651,59 @@ class AppBackendTests(unittest.TestCase):
         finally:
             app_module.filedialog.asksaveasfilename = original_dialog
             app_module.write_benchmark_csv = original_writer
+            app_module.messagebox.showinfo = original_showinfo
+            root.destroy()
+
+    def test_export_random_3sat_csv_uses_visible_random_rows(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        original_dialog = app_module.filedialog.asksaveasfilename
+        original_writer = app_module.write_random_3sat_benchmark_csv
+        original_showinfo = app_module.messagebox.showinfo
+        exported = {}
+        try:
+            app = SATApp(root)
+            job = app._create_job("benchmark", "Random benchmark")
+            random_row = BenchmarkRow(
+                "random case",
+                "Random 3-SAT",
+                "ProbSAT",
+                "UNKNOWN",
+                0.1,
+                10,
+                5,
+                1,
+            )
+            graph_row = BenchmarkRow(
+                "graph case",
+                "Graph Coloring",
+                "CDCL",
+                "SAT",
+                0.2,
+                10,
+                5,
+                1,
+            )
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": job.job_id, "row": random_row}, current=1, total=2))
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": job.job_id, "row": graph_row}, current=2, total=2))
+            app.benchmark_filter_run_label = job.label
+            app._fill_benchmark_table()
+
+            app_module.filedialog.asksaveasfilename = lambda **_kwargs: "random-visible.csv"
+            app_module.write_random_3sat_benchmark_csv = lambda path, rows: exported.update(path=path, rows=list(rows))
+            app_module.messagebox.showinfo = lambda *_args, **_kwargs: None
+
+            app.export_random_3sat_csv()
+
+            self.assertEqual(exported["path"], "random-visible.csv")
+            self.assertEqual(exported["rows"], [random_row])
+        finally:
+            app_module.filedialog.asksaveasfilename = original_dialog
+            app_module.write_random_3sat_benchmark_csv = original_writer
             app_module.messagebox.showinfo = original_showinfo
             root.destroy()
 

@@ -74,6 +74,10 @@ class BenchmarkRow:
     problem_metadata: dict[str, Any] = field(default_factory=dict)
     problem_clauses: list[list[int]] = field(default_factory=list)
     run_label: str = ""
+    flips: int | str = "-"
+    tries: int | str = "-"
+    best_unsatisfied: int | str = "-"
+    timeout: float | str = "-"
 
     def as_csv_row(self) -> list[Any]:
         return [

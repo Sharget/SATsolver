@@ -1,13 +1,14 @@
-from solvers.heuristics import choose_variable_smart, choose_variable_basic, choose_variable_small_clause
+from legacy.heuristics import choose_variable_smart, choose_variable_basic, choose_variable_small_clause
 
 from utils.general_utils import clear_console, indent
-import utils.colored_text as txt
+import legacy.colored_text as txt
 from legacy.sudoku_4x4 import generate_sudoku_4x4_clauses 
 from legacy.sudoku_9x9 import generate_sudoku_9x9_clauses 
 from utils.sudoku_general import generate_sudoku_clauses, print_sudoku, decode_sudoku, solve_sudoku
-from utils.dimacs import read_dimacs_cnf, write_dimacs_cnf
+from legacy.dimacs import read_dimacs_cnf, write_dimacs_cnf
 
-from solvers.dpll import dpll,dpll_debug
+from legacy.dpll_debug import dpll_debug
+from solvers.dpll import dpll
 # from solvers.cdcl import cdcl
 # from solvers.cdcl2 import cdcl_debug as cdcl
 

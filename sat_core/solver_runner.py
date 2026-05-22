@@ -4,17 +4,18 @@ import time
 
 from solvers.cdcl import cdcl
 from solvers.dpll import dpll
-from solvers.heuristics import choose_variable_small_clause
 from solvers.walksat import walksat
 from sat_core.models import ProblemInstance, SolveResult
 from sat_core.runtime import EVENT_LOG, RunToken, cancellation_status, emit, stop_requested
 
 
-SOLVERS = ("CDCL", "DPLL", "WalkSAT")
+SOLVERS = ("CDCL", "DPLL", "WalkSAT", "ProbSAT")
 
 
 def _canonical_solver_name(solver_name: str) -> str:
     key = solver_name.strip().upper()
+    if key in ("PROBSAT", "PROB SAT"):
+        return "ProbSAT"
     if key == "WALKSAT":
         return "WalkSAT"
     if key in ("CDCL", "DPLL"):
@@ -31,6 +32,15 @@ def _options_for_solver(solver_name: str, options: dict) -> dict:
             solver_key = f"walksat_{key}"
             if solver_key in options:
                 solver_options[key] = options[solver_key]
+    elif solver_name == "ProbSAT":
+        for key in ("max_tries", "max_flips", "noise", "random_seed", "adaptive_noise"):
+            probsat_key = f"probsat_{key}"
+            walksat_key = f"walksat_{key}"
+            if probsat_key in options:
+                solver_options[key] = options[probsat_key]
+            elif walksat_key in options:
+                solver_options[key] = options[walksat_key]
+        solver_options["selection_mode"] = "probsat"
     return solver_options
 
 
@@ -83,7 +93,6 @@ def solve_clauses(
     elif solver_name == "DPLL":
         solution, stats = dpll(
             clauses,
-            choose_var_fn=choose_variable_small_clause,
             cancel_token=cancel_token,
             return_stats=True,
             event_callback=event_callback,
@@ -91,7 +100,7 @@ def solve_clauses(
         )
         elapsed = stats.get("elapsed", time.perf_counter() - started)
         status = stats.get("status", "SAT" if solution is not None else "UNSAT")
-    elif solver_name == "WalkSAT":
+    elif solver_name in ("WalkSAT", "ProbSAT"):
         solution, stats = walksat(
             clauses,
             return_stats=True,
@@ -104,6 +113,7 @@ def solve_clauses(
     else:
         raise ValueError(f"Unknown solver: {solver_name}")
 
+    stats.setdefault("timeout", timeout_seconds if timeout_seconds is not None else "-")
     stats.setdefault("solver_options", _solver_options_summary(solver_name, solver_logging_options))
 
     if status == "CANCELLED":
@@ -187,12 +197,12 @@ def _solver_options_summary(solver_name: str, options: dict) -> str:
             f"learned_limit={options.get('learned_clause_limit') or '-'}; "
             f"seed={options.get('random_seed') or '-'}"
         )
-    if solver_name == "WalkSAT":
+    if solver_name in ("WalkSAT", "ProbSAT"):
         return (
             f"tries={options.get('max_tries', 10)}; "
             f"flips={options.get('max_flips', 10000)}; "
             f"noise={options.get('noise', 0.5)}; "
-            f"strategy={options.get('selection_mode', 'walksat')}; "
+            f"strategy={options.get('selection_mode', 'probsat' if solver_name == 'ProbSAT' else 'walksat')}; "
             f"adaptive_noise={'on' if options.get('adaptive_noise') else 'off'}; "
             f"seed={options.get('random_seed') or '-'}"
         )

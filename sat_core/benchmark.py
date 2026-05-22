@@ -34,6 +34,18 @@ from problems.n_queens import n_queens_problem
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.models import BENCHMARK_HEADERS, BenchmarkRow, ProblemInstance, SolveResult
+from sat_core.random_3sat_presets import (
+    RANDOM_3SAT_PRESET_A,
+    RANDOM_3SAT_PRESET_B,
+    RANDOM_3SAT_PRESET_C,
+    RANDOM_3SAT_PRESET_CUSTOM,
+    RANDOM_3SAT_PRESETS,
+    random_3sat_preset_case_count,
+    random_3sat_preset_cases,
+    random_3sat_preset_default_solvers,
+    random_3sat_preset_should_skip_solver,
+    random_3sat_preset_solver_timeout,
+)
 from sat_core.runtime import (
     EVENT_CANCELLED,
     EVENT_LOG,
@@ -45,10 +57,29 @@ from sat_core.runtime import (
     skip_requested,
 )
 from sat_core.solver_runner import solve_problem
-from utils.colored_graph import generate_random_graph, generate_random_graph_exact_edges, graph_edges
+from utils.graph_utils import generate_random_graph, generate_random_graph_exact_edges, graph_edges
 
 
 SUDOKU_BENCHMARK_SIZES = (4, 9, 16, 25)
+RANDOM_3SAT_CSV_HEADERS = [
+    "problem_mode",
+    "n_vars",
+    "ratio",
+    "n_clauses",
+    "sat_fraction",
+    "seed",
+    "solver",
+    "status",
+    "elapsed",
+    "decisions",
+    "conflicts",
+    "propagations",
+    "learned_clauses",
+    "flips",
+    "tries",
+    "best_unsatisfied",
+    "timeout",
+]
 
 
 def result_to_row(problem: ProblemInstance, result: SolveResult, repeat: int) -> BenchmarkRow:
@@ -76,6 +107,10 @@ def result_to_row(problem: ProblemInstance, result: SolveResult, repeat: int) ->
         solver_options=stats.get("solver_options", ""),
         problem_metadata=dict(problem.metadata),
         problem_clauses=[clause[:] for clause in problem.clauses],
+        flips=stats.get("flips", "-"),
+        tries=stats.get("tries", "-"),
+        best_unsatisfied=stats.get("best_unsatisfied", "-"),
+        timeout=stats.get("timeout", "-"),
     )
 
 
@@ -125,6 +160,8 @@ def _run_case_solvers(
     cancel_token: RunToken | None,
     logging_options: dict | None,
     timeout_seconds: float | None,
+    timeout_for_solver=None,
+    skip_solver=None,
 ) -> tuple[int, bool]:
     for solver_index, solver in enumerate(solvers):
         if cancel_requested(cancel_token):
@@ -146,14 +183,28 @@ def _run_case_solvers(
             _clear_skip(cancel_token)
             return run_index, True
 
+        if skip_solver is not None and skip_solver(solver, problem):
+            emit(event_callback, EVENT_LOG, f"   -> Skipping {solver} solver by preset policy.")
+            run_index = _emit_benchmark_result(
+                rows,
+                event_callback,
+                problem,
+                skipped_result(problem, solver),
+                repeat,
+                run_index,
+                total_runs,
+            )
+            continue
+
         emit(event_callback, EVENT_LOG, f"   -> Running {solver} solver...")
+        solver_timeout = timeout_for_solver(solver, problem, timeout_seconds) if timeout_for_solver else timeout_seconds
         result = solve_problem(
             problem,
             solver,
             event_callback=event_callback,
             cancel_token=cancel_token,
             logging_options=logging_options,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=solver_timeout,
         )
 
         if result.status == "CANCELLED":
@@ -379,6 +430,82 @@ def run_n_queens_sweep(
             )
             if not should_continue:
                 return rows
+
+    return rows
+
+
+def _random_3sat_preset_timeout(solver: str, problem: ProblemInstance, timeout_seconds: float | None) -> float | None:
+    return random_3sat_preset_solver_timeout(
+        solver,
+        int(problem.metadata.get("variables", 0)),
+        timeout_seconds,
+        problem.metadata.get("preset"),
+    )
+
+
+def _random_3sat_preset_skip(solver: str, problem: ProblemInstance) -> bool:
+    return random_3sat_preset_should_skip_solver(
+        solver,
+        int(problem.metadata.get("variables", 0)),
+        problem.metadata.get("preset"),
+    )
+
+
+def run_random_3sat_preset(
+    preset_name: str,
+    solvers: Iterable[str],
+    event_callback=None,
+    cancel_token: RunToken | None = None,
+    logging_options: dict | None = None,
+    timeout_seconds: float | None = None,
+) -> list[BenchmarkRow]:
+    cases = random_3sat_preset_cases(preset_name)
+    solvers = list(solvers)
+    rows = []
+    total_runs = len(cases) * len(solvers)
+    run_index = 0
+
+    if cancel_requested(cancel_token):
+        emit(event_callback, EVENT_CANCELLED, "Benchmark cancelled before start.", current=0, total=total_runs)
+        return rows
+
+    for case_index, case in enumerate(cases, start=1):
+        if cancel_requested(cancel_token):
+            emit(event_callback, EVENT_CANCELLED, "Benchmark cancelled.", current=run_index, total=total_runs)
+            return rows
+
+        problem = random_3sat_problem(
+            case["variable_count"],
+            case["clause_count"],
+            seed=case["seed"],
+            formula_mode=case["formula_mode"],
+            sat_percentage=case["sat_percentage"],
+        )
+        problem.metadata.update({
+            "preset": preset_name,
+            "preset_case_index": case_index,
+            "preset_sat_fraction": case["sat_fraction"],
+        })
+        emit(event_callback, EVENT_LOG, f"[{case_index}/{len(cases)}] {preset_name}: {problem.name} seed {case['seed']}")
+        emit(event_callback, EVENT_LOG, "   -> Generating CNF...")
+        emit(event_callback, EVENT_LOG, _random_3sat_generation_summary(problem))
+
+        run_index, should_continue = _run_case_solvers(
+            problem,
+            solvers,
+            case["seed"],
+            rows,
+            run_index,
+            total_runs,
+            event_callback,
+            cancel_token,
+            logging_options,
+            timeout_seconds,
+            timeout_for_solver=_random_3sat_preset_timeout,
+            skip_solver=_random_3sat_preset_skip,
+        )
+        if not should_continue:
+            return rows
 
     return rows
 
@@ -1033,3 +1160,51 @@ def write_benchmark_csv(path: str | Path, rows: list[BenchmarkRow]) -> None:
         writer.writerow(BENCHMARK_HEADERS)
         for row in rows:
             writer.writerow(row.as_csv_row())
+
+
+def _random_3sat_sat_fraction(row: BenchmarkRow):
+    metadata = row.problem_metadata
+    if "preset_sat_fraction" in metadata:
+        return metadata["preset_sat_fraction"]
+    if metadata.get("mode") == "Planted SAT":
+        return 1.0
+    if metadata.get("mode") == "Forced UNSAT":
+        return 0.0
+    sat_percentage = metadata.get("sat_percentage")
+    if sat_percentage is None:
+        return ""
+    return float(sat_percentage) / 100
+
+
+def random_3sat_csv_row(row: BenchmarkRow) -> list:
+    metadata = row.problem_metadata
+    return [
+        metadata.get("mode", ""),
+        metadata.get("variables", ""),
+        metadata.get("ratio", ""),
+        metadata.get("clauses_requested", row.clauses),
+        _random_3sat_sat_fraction(row),
+        metadata.get("seed", row.seed),
+        row.solver,
+        row.status,
+        f"{row.elapsed:.8f}",
+        row.decisions,
+        row.conflicts,
+        row.propagations,
+        row.learned_clauses,
+        row.flips,
+        row.tries,
+        row.best_unsatisfied,
+        row.timeout,
+    ]
+
+
+def write_random_3sat_benchmark_csv(path: str | Path, rows: list[BenchmarkRow]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with target.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(RANDOM_3SAT_CSV_HEADERS)
+        for row in rows:
+            writer.writerow(random_3sat_csv_row(row))

@@ -1,4 +1,4 @@
-from utils.dimacs import read_dimacs_cnf
+from legacy.dimacs import read_dimacs_cnf
 
 formula_sudoku_4x4 = read_dimacs_cnf("input/sudoku_4x4.cnf")
 formula_sudoku_9x9 = read_dimacs_cnf("input/sudoku_9x9.cnf")

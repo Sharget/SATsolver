@@ -35,11 +35,13 @@ from sat_core.benchmark import (
     run_hamiltonian_path_sweep,
     run_independent_set_sweep,
     run_n_queens_sweep,
+    run_random_3sat_preset,
     run_random_3sat_sweep,
     run_sudoku_sweep,
 )
 from sat_core.dimacs import clauses_to_dimacs
 from sat_core.models import ProblemInstance
+from sat_core.random_3sat_presets import RANDOM_3SAT_PRESET_CUSTOM
 from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_PROGRESS, EVENT_RESULT, RunEvent, RunToken
 from sat_core.solver_runner import solve_problem
 
@@ -265,20 +267,31 @@ def benchmark_process(params: dict, skip_event, event_queue, cancel_event) -> No
             timeout_seconds=params.get("timeout_seconds"),
         )
     elif params.get("problem_type") == "Random 3-SAT":
-        run_random_3sat_sweep(
-            params["variable_counts"],
-            params["clause_ratios"],
-            params["solvers"],
-            params["repeats"],
-            seed=params.get("seed"),
-            planted=params.get("planted", True),
-            formula_mode=params.get("formula_mode"),
-            sat_percentage=params.get("sat_percentage"),
-            event_callback=lambda event: _emit(event_queue, event),
-            cancel_token=token,
-            logging_options=params.get("logging_options"),
-            timeout_seconds=params.get("timeout_seconds"),
-        )
+        preset_name = params.get("preset_name", RANDOM_3SAT_PRESET_CUSTOM)
+        if preset_name != RANDOM_3SAT_PRESET_CUSTOM:
+            run_random_3sat_preset(
+                preset_name,
+                params["solvers"],
+                event_callback=lambda event: _emit(event_queue, event),
+                cancel_token=token,
+                logging_options=params.get("logging_options"),
+                timeout_seconds=params.get("timeout_seconds"),
+            )
+        else:
+            run_random_3sat_sweep(
+                params["variable_counts"],
+                params["clause_ratios"],
+                params["solvers"],
+                params["repeats"],
+                seed=params.get("seed"),
+                planted=params.get("planted", True),
+                formula_mode=params.get("formula_mode"),
+                sat_percentage=params.get("sat_percentage"),
+                event_callback=lambda event: _emit(event_queue, event),
+                cancel_token=token,
+                logging_options=params.get("logging_options"),
+                timeout_seconds=params.get("timeout_seconds"),
+            )
     elif params.get("problem_type") == "Hamiltonian Path":
         run_hamiltonian_path_sweep(
             params["node_counts"],

@@ -11,7 +11,6 @@ from legacy.experiments.puzzels import (
     grid_9x9,
     grid_16x16
 )
-from solvers.heuristics import choose_variable_small_clause
 
 def benchmark(name, func, *args, runs=3):
     times = []

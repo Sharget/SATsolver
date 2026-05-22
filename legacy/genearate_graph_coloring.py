@@ -1,6 +1,7 @@
-from utils.colored_graph import generate_random_graph, generate_coloring_clauses, solve_coloring_native_optimised, solve_coloring_native, decode_coloring
-from utils.dimacs import write_dimacs_cnf, read_dimacs_cnf
-from solvers.dpll import dpll,dpll_debug
+from legacy.colored_graph import generate_random_graph, generate_coloring_clauses, solve_coloring_native_optimised, solve_coloring_native, decode_coloring
+from legacy.dimacs import write_dimacs_cnf, read_dimacs_cnf
+from legacy.dpll_debug import dpll_debug
+from solvers.dpll import dpll
 import time
 import os
 import matplotlib.pyplot as plt

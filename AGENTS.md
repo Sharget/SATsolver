@@ -37,7 +37,7 @@ python scripts/benchmark_cdcl.py
   - `dimacs.py`: DIMACS parse/format/load/save helpers for the app
 - `problems/` contains problem encoders that return `ProblemInstance`.
   Add new NP problems here rather than inside the UI.
-- `solvers/` contains SAT solvers and heuristics.
+- `solvers/` contains active SAT solvers.
   Keep `dpll.py` and `cdcl.py` APIs backward-compatible unless tests and docs
   are updated intentionally.
 - `utils/` contains lower-level helpers still used by product code.
@@ -159,4 +159,3 @@ Use focused tests for new encoders:
   the app call that backend.
 - Keep comments readable and useful, especially around SAT/CDCL logic.
 - Use ASCII in source/docs unless a file already clearly requires Unicode.
-

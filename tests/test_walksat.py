@@ -220,6 +220,33 @@ class WalkSATTests(unittest.TestCase):
         self.assertIn("adaptive_noise=on", result.stats["solver_options"])
         self.assertIn("seed=9", result.stats["solver_options"])
 
+    def test_solver_runner_maps_probsat_specific_options(self):
+        result = solve_clauses(
+            [[1], [-1]],
+            "ProbSAT",
+            logging_options={
+                "random_seed": 1,
+                "walksat_random_seed": 9,
+                "walksat_max_tries": 2,
+                "walksat_max_flips": 3,
+                "walksat_noise": 0.25,
+                "probsat_random_seed": 11,
+                "probsat_max_tries": 4,
+                "probsat_max_flips": 5,
+                "probsat_noise": 0.15,
+                "probsat_adaptive_noise": True,
+            },
+        )
+
+        self.assertEqual(result.solver, "ProbSAT")
+        self.assertEqual(result.status, "UNKNOWN")
+        self.assertIn("tries=4", result.stats["solver_options"])
+        self.assertIn("flips=5", result.stats["solver_options"])
+        self.assertIn("noise=0.15", result.stats["solver_options"])
+        self.assertIn("strategy=probsat", result.stats["solver_options"])
+        self.assertIn("adaptive_noise=on", result.stats["solver_options"])
+        self.assertIn("seed=11", result.stats["solver_options"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,7 @@ import random
 
 from problems.graph_coloring import edge_count, edge_count_from_average_degree, normalize_graph, parse_edge_list
 from sat_core.models import ProblemInstance
-from utils.colored_graph import generate_random_graph, generate_random_graph_exact_edges, graph_edges
+from utils.graph_utils import generate_random_graph, generate_random_graph_exact_edges, graph_edges
 
 
 Graph = dict[int, list[int]]

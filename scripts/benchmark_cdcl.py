@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
 from solvers.cdcl import cdcl
 from solvers.dpll import dpll
 from solvers.walksat import walksat
-from utils.dimacs import read_dimacs_cnf
+from sat_core.dimacs import load_dimacs
 
 
 CASES = [
@@ -36,7 +36,7 @@ def main():
     print("CASE\tSOLVER\tSTATUS\tTIME\tCONFLICTS\tDECISIONS")
 
     for path in CASES:
-        clauses = read_dimacs_cnf(path)
+        clauses = load_dimacs(path)
 
         for name, solver in [("DPLL", dpll), ("CDCL", cdcl), ("WalkSAT", walksat)]:
             status, elapsed, stats = time_solver(name, solver, clauses)

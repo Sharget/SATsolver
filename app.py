@@ -45,10 +45,18 @@ from problems.independent_set import (
 from problems.n_queens import n_queens_problem
 from problems.random_3sat import RANDOM_3SAT_MODES, random_3sat_problem
 from problems.sudoku import sudoku_problem
-from sat_core.benchmark import SUDOKU_BENCHMARK_SIZES, write_benchmark_csv
+from sat_core.benchmark import SUDOKU_BENCHMARK_SIZES, write_benchmark_csv, write_random_3sat_benchmark_csv
 from sat_core.dimacs import clauses_to_dimacs, load_dimacs, save_dimacs
 from sat_core.models import BenchmarkRow, ProblemInstance
 from sat_core.process_workers import benchmark_process, generate_cnf_process, solve_process
+from sat_core.random_3sat_presets import (
+    RANDOM_3SAT_PRESET_CUSTOM,
+    random_3sat_preset_case_count,
+    random_3sat_preset_default_solvers,
+    random_3sat_preset_names,
+    random_3sat_preset_summary,
+    random_3sat_preset_ui_values,
+)
 from sat_core.runtime import (
     EVENT_CANCELLED,
     EVENT_CNF,
@@ -196,10 +204,13 @@ class SATApp:
             )
 
     def _build_layout(self) -> None:
+        self.root.rowconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=0)
+        self.root.columnconfigure(0, weight=1)
         self.notebook = ttk.Notebook(self.root)
         self.solve_tab = self._build_tab("Solve")
         self.benchmark_tab = self._build_tab("Benchmarks")
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
         self.root.bind_all("<MouseWheel>", self._scroll_local_panel, add="+")
         self.root.bind_class("TCombobox", "<MouseWheel>", self._scroll_page_from_combobox)
 
@@ -346,7 +357,7 @@ class SATApp:
 
     def _build_runtime_panel(self) -> None:
         panel = ttk.LabelFrame(self.root, text="Run Feed", padding=8)
-        panel.pack(fill=tk.X, padx=10, pady=(0, 10))
+        panel.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         panel.columnconfigure(0, weight=1)
 
         self.run_status = tk.StringVar(value="Ready")
@@ -1126,12 +1137,12 @@ class SATApp:
             width=20,
         )
 
-        center_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
-        center_pane.grid(row=0, column=0, sticky="nsew")
-        cnf_frame = ttk.LabelFrame(center_pane, text="CNF Preview", padding=6)
-        result_frame = ttk.LabelFrame(center_pane, text="Result", padding=6)
-        center_pane.add(cnf_frame, weight=2)
-        center_pane.add(result_frame, weight=1)
+        self.solve_result_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
+        self.solve_result_pane.grid(row=0, column=0, sticky="nsew")
+        cnf_frame = ttk.LabelFrame(self.solve_result_pane, text="CNF Preview", padding=6)
+        result_frame = ttk.LabelFrame(self.solve_result_pane, text="Result", padding=6)
+        self.solve_result_pane.add(cnf_frame, weight=2)
+        self.solve_result_pane.add(result_frame, weight=1)
         cnf_frame.rowconfigure(0, weight=1)
         cnf_frame.columnconfigure(0, weight=1)
         result_frame.rowconfigure(0, weight=1)
@@ -1148,11 +1159,22 @@ class SATApp:
         result_scroll = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_text.yview)
         result_scroll.grid(row=0, column=1, sticky="ns")
         self.result_text.configure(yscrollcommand=result_scroll.set)
+        self.root.after(80, self._set_initial_solve_result_sash)
 
         self._build_solve_detail_panel(detail_shell)
 
         self._refresh_problem_form()
         self._refresh_solver_log_controls()
+
+    def _set_initial_solve_result_sash(self) -> None:
+        if not hasattr(self, "solve_result_pane"):
+            return
+        try:
+            height = self.solve_result_pane.winfo_height()
+            if height > 60:
+                self.solve_result_pane.sashpos(0, max(140, int(height * 0.62)))
+        except tk.TclError:
+            pass
 
     def _build_solve_action_buttons(self, parent, row: int) -> None:
         actions = ttk.LabelFrame(parent, text="Actions", padding=6)
@@ -1425,42 +1447,52 @@ class SATApp:
         adaptive_noise_var,
         random_seed_var,
         width: int,
+        show_strategy: bool = True,
+        help_text: str | None = None,
     ) -> None:
-        ttk.Label(parent, text="Max tries").grid(row=start_row, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(parent, textvariable=max_tries_var, width=width).grid(row=start_row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        row = start_row
+        ttk.Label(parent, text="Max tries").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=max_tries_var, width=width).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(parent, text="Max flips").grid(row=start_row + 1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(parent, textvariable=max_flips_var, width=width).grid(row=start_row + 1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        row += 1
+        ttk.Label(parent, text="Max flips").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=max_flips_var, width=width).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(parent, text="Noise").grid(row=start_row + 2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(parent, textvariable=noise_var, width=width).grid(row=start_row + 2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        row += 1
+        ttk.Label(parent, text="Noise").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=noise_var, width=width).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(parent, text="Strategy").grid(row=start_row + 3, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(
-            parent,
-            textvariable=selection_mode_var,
-            values=WALKSAT_STRATEGIES,
-            state="readonly",
-            width=width,
-        ).grid(row=start_row + 3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        if show_strategy:
+            row += 1
+            ttk.Label(parent, text="Strategy").grid(row=row, column=0, sticky="w", pady=(8, 0))
+            ttk.Combobox(
+                parent,
+                textvariable=selection_mode_var,
+                values=WALKSAT_STRATEGIES,
+                state="readonly",
+                width=width,
+            ).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
+        row += 1
         ttk.Checkbutton(parent, text="Adaptive noise", variable=adaptive_noise_var).grid(
-            row=start_row + 4,
+            row=row,
             column=0,
             columnspan=2,
             sticky="w",
             pady=(8, 0),
         )
 
-        ttk.Label(parent, text="Random seed").grid(row=start_row + 5, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=start_row + 5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        row += 1
+        ttk.Label(parent, text="Random seed").grid(row=row, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(parent, textvariable=random_seed_var, width=width).grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
 
-        help_text = (
+        default_help_text = (
             "Classic mixes random and greedy flips. ProbSAT favors low-break, "
             "high-make flips. Adaptive noise increases randomness after stagnation."
         )
-        ttk.Label(parent, text=help_text, wraplength=260, justify="left").grid(
-            row=start_row + 6,
+        row += 1
+        ttk.Label(parent, text=help_text or default_help_text, wraplength=260, justify="left").grid(
+            row=row,
             column=0,
             columnspan=2,
             sticky="ew",
@@ -1478,6 +1510,8 @@ class SATApp:
         adaptive_noise_var,
         random_seed_var,
         width: int,
+        show_strategy: bool = True,
+        help_text: str | None = None,
     ):
         frame = ttk.LabelFrame(parent, text="WalkSAT Options", padding=6)
         frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
@@ -1492,6 +1526,37 @@ class SATApp:
             adaptive_noise_var,
             random_seed_var,
             width,
+            show_strategy=show_strategy,
+            help_text=help_text,
+        )
+        return frame
+
+    def _build_probsat_option_group(
+        self,
+        parent,
+        row: int,
+        max_tries_var,
+        max_flips_var,
+        noise_var,
+        adaptive_noise_var,
+        random_seed_var,
+        width: int,
+    ):
+        frame = ttk.LabelFrame(parent, text="ProbSAT Options", padding=6)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        frame.columnconfigure(1, weight=1)
+        self._build_walksat_option_controls(
+            frame,
+            0,
+            max_tries_var,
+            max_flips_var,
+            noise_var,
+            None,
+            adaptive_noise_var,
+            random_seed_var,
+            width,
+            show_strategy=False,
+            help_text="ProbSAT uses the same local-search limits, but always chooses flips with the probabilistic low-break strategy.",
         )
         return frame
 
@@ -1947,9 +2012,14 @@ class SATApp:
             self.bench_walksat_max_tries.get(),
             self.bench_walksat_max_flips.get(),
             self.bench_walksat_noise.get(),
-            self.bench_walksat_selection_mode.get(),
+            "Classic WalkSAT",
             self.bench_walksat_adaptive_noise.get(),
             self.bench_walksat_random_seed.get(),
+            self.bench_probsat_max_tries.get(),
+            self.bench_probsat_max_flips.get(),
+            self.bench_probsat_noise.get(),
+            self.bench_probsat_adaptive_noise.get(),
+            self.bench_probsat_random_seed.get(),
         )
 
     def _logging_options(
@@ -1968,6 +2038,11 @@ class SATApp:
         walksat_selection_mode: str = "Classic WalkSAT",
         walksat_adaptive_noise: bool = False,
         walksat_random_seed: str = "",
+        probsat_max_tries: str | None = None,
+        probsat_max_flips: str | None = None,
+        probsat_noise: str | None = None,
+        probsat_adaptive_noise: bool | None = None,
+        probsat_random_seed: str | None = None,
     ) -> dict:
         if not enabled:
             options = {"mode": "normal"}
@@ -1988,6 +2063,11 @@ class SATApp:
         options["walksat_selection_mode"] = self._walksat_selection_mode_key(walksat_selection_mode)
         options["walksat_adaptive_noise"] = bool(walksat_adaptive_noise)
         options["walksat_random_seed"] = self._optional_int_text(walksat_random_seed)
+        options["probsat_max_tries"] = self._positive_int_text(probsat_max_tries if probsat_max_tries is not None else walksat_max_tries)
+        options["probsat_max_flips"] = self._positive_int_text(probsat_max_flips if probsat_max_flips is not None else walksat_max_flips)
+        options["probsat_noise"] = self._probability_text(probsat_noise if probsat_noise is not None else walksat_noise)
+        options["probsat_adaptive_noise"] = bool(probsat_adaptive_noise) if probsat_adaptive_noise is not None else bool(walksat_adaptive_noise)
+        options["probsat_random_seed"] = self._optional_int_text(probsat_random_seed if probsat_random_seed is not None else walksat_random_seed)
         return options
 
     def _walksat_selection_mode_key(self, text: str) -> str:
@@ -2341,6 +2421,8 @@ class SATApp:
         self.bench_colors = tk.StringVar(value="2,3")
         self.bench_targets = tk.StringVar(value="2,3")
         self.bench_n_queens_sizes = tk.StringVar(value="4,8")
+        self.bench_3sat_preset = tk.StringVar(value=RANDOM_3SAT_PRESET_CUSTOM)
+        self.bench_3sat_preset_summary = tk.StringVar(value="Custom Random 3-SAT sweep.")
         self.bench_3sat_variables = tk.StringVar(value="20,50,100")
         self.bench_3sat_ratios = tk.StringVar(value="3.5,4.2,5.0")
         self.bench_3sat_mode = tk.StringVar(value="Planted SAT")
@@ -2351,6 +2433,7 @@ class SATApp:
         self.bench_cdcl = tk.BooleanVar(value=True)
         self.bench_dpll = tk.BooleanVar(value=False)
         self.bench_walksat = tk.BooleanVar(value=False)
+        self.bench_probsat = tk.BooleanVar(value=False)
         self.bench_advanced_solver_logs = tk.BooleanVar(value=False)
         self.bench_solver_log_level = tk.StringVar(value="Periodic progress")
         self.bench_cdcl_branching = tk.StringVar(value="VSIDS")
@@ -2365,6 +2448,11 @@ class SATApp:
         self.bench_walksat_selection_mode = tk.StringVar(value="Classic WalkSAT")
         self.bench_walksat_adaptive_noise = tk.BooleanVar(value=False)
         self.bench_walksat_random_seed = tk.StringVar(value="")
+        self.bench_probsat_max_tries = tk.StringVar(value="10")
+        self.bench_probsat_max_flips = tk.StringVar(value="10000")
+        self.bench_probsat_noise = tk.StringVar(value="0.5")
+        self.bench_probsat_adaptive_noise = tk.BooleanVar(value=False)
+        self.bench_probsat_random_seed = tk.StringVar(value="")
         self.bench_suite_graph_coloring = tk.BooleanVar(value=False)
         self.bench_suite_hamiltonian = tk.BooleanVar(value=False)
         self.bench_suite_independent = tk.BooleanVar(value=True)
@@ -2404,6 +2492,12 @@ class SATApp:
             self.export_benchmark_csv,
             style="Export.TButton",
         )
+        self.export_3sat_csv_button = self._toolbar_button(
+            toolbar,
+            "Export 3-SAT CSV",
+            self.export_random_3sat_csv,
+            style="Export.TButton",
+        )
         self.export_chart_button = self._toolbar_button(
             toolbar,
             "Export Chart",
@@ -2441,8 +2535,9 @@ class SATApp:
         self.refresh_chart_button = self._toolbar_button(toolbar, "@ Refresh Chart", self.draw_benchmark_chart)
         self.refresh_chart_button.grid(row=0, column=7, sticky="w", padx=(0, 6))
         self.export_csv_button.grid(row=0, column=8, sticky="w", padx=(0, 6))
-        self.export_chart_button.grid(row=0, column=9, sticky="w", padx=(0, 6))
-        self.clear_benchmark_table_button.grid(row=0, column=10, sticky="w")
+        self.export_3sat_csv_button.grid(row=0, column=9, sticky="w", padx=(0, 6))
+        self.export_chart_button.grid(row=0, column=10, sticky="w", padx=(0, 6))
+        self.clear_benchmark_table_button.grid(row=0, column=11, sticky="w")
 
         workspace = ttk.PanedWindow(self.benchmark_tab, orient=tk.HORIZONTAL)
         workspace.grid(row=1, column=0, sticky="nsew")
@@ -2496,11 +2591,13 @@ class SATApp:
         solver_frame.columnconfigure(0, weight=1)
         solver_frame.columnconfigure(1, weight=1)
         solver_frame.columnconfigure(2, weight=1)
+        solver_frame.columnconfigure(3, weight=1)
         ttk.Checkbutton(solver_frame, text="CDCL", variable=self.bench_cdcl).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(solver_frame, text="DPLL", variable=self.bench_dpll).grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(solver_frame, text="WalkSAT", variable=self.bench_walksat).grid(row=0, column=2, sticky="w")
+        ttk.Checkbutton(solver_frame, text="ProbSAT", variable=self.bench_probsat).grid(row=0, column=3, sticky="w")
         self.benchmark_solver_guide = self._build_solver_guide(solver_frame, row=None, wraplength=190)
-        self.benchmark_solver_guide.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.benchmark_solver_guide.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
 
         ttk.Checkbutton(
             self.benchmark_controls,
@@ -2539,14 +2636,26 @@ class SATApp:
             self.bench_walksat_adaptive_noise,
             self.bench_walksat_random_seed,
             width=16,
+            show_strategy=False,
+            help_text="Benchmark WalkSAT uses the classic random/greedy flip strategy. ProbSAT has its own configuration below.",
+        )
+        self.benchmark_probsat_options_frame = self._build_probsat_option_group(
+            self.benchmark_controls,
+            11,
+            self.bench_probsat_max_tries,
+            self.bench_probsat_max_flips,
+            self.bench_probsat_noise,
+            self.bench_probsat_adaptive_noise,
+            self.bench_probsat_random_seed,
+            width=16,
         )
 
         center.rowconfigure(0, weight=1)
         center.columnconfigure(0, weight=1)
-        center_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
-        center_pane.grid(row=0, column=0, sticky="nsew")
+        self.benchmark_results_pane = ttk.PanedWindow(center, orient=tk.VERTICAL)
+        self.benchmark_results_pane.grid(row=0, column=0, sticky="nsew")
 
-        table_frame = ttk.LabelFrame(center_pane, text="Runs", padding=6)
+        table_frame = ttk.LabelFrame(self.benchmark_results_pane, text="Runs", padding=6)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
@@ -2587,11 +2696,11 @@ class SATApp:
         table_xscroll.grid(row=1, column=0, sticky="ew")
         self.benchmark_table.configure(yscrollcommand=table_scroll.set, xscrollcommand=table_xscroll.set)
 
-        self.chart_frame = ttk.LabelFrame(center_pane, text="Chart", padding=8)
+        self.chart_frame = ttk.LabelFrame(self.benchmark_results_pane, text="Chart", padding=8)
         self.chart_frame.rowconfigure(0, weight=1)
         self.chart_frame.columnconfigure(0, weight=1)
-        center_pane.add(table_frame, weight=2)
-        center_pane.add(self.chart_frame, weight=1)
+        self.benchmark_results_pane.add(table_frame, weight=3)
+        self.benchmark_results_pane.add(self.chart_frame, weight=1)
 
         self._build_benchmark_detail_panel(detail_shell)
 
@@ -2953,13 +3062,54 @@ class SATApp:
         ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_n_queens_sizes, width=18).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
 
     def _build_random_3sat_benchmark_form(self) -> None:
-        ttk.Label(self.benchmark_input_frame, text="Variables").grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_3sat_variables, width=18).grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
-        ttk.Label(self.benchmark_input_frame, text="Clause/var ratios").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_3sat_ratios, width=18).grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=2)
-        ttk.Label(self.benchmark_input_frame, text="Seed").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(self.benchmark_input_frame, textvariable=self.bench_seed, width=18).grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
-        ttk.Label(self.benchmark_input_frame, text="Formula mode").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Preset").grid(row=0, column=0, sticky="w", pady=2)
+        preset_frame = ttk.Frame(self.benchmark_input_frame)
+        preset_frame.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=2)
+        preset_frame.columnconfigure(0, weight=1)
+        preset_combo = ttk.Combobox(
+            preset_frame,
+            textvariable=self.bench_3sat_preset,
+            values=random_3sat_preset_names(),
+            state="readonly",
+            width=18,
+        )
+        preset_combo.grid(row=0, column=0, sticky="ew")
+        preset_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_random_3sat_preset())
+        ttk.Button(
+            preset_frame,
+            text="Apply",
+            command=self._apply_random_3sat_preset,
+            width=7,
+        ).grid(row=0, column=1, sticky="e", padx=(6, 0))
+        ttk.Label(
+            self.benchmark_input_frame,
+            textvariable=self.bench_3sat_preset_summary,
+            wraplength=240,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+
+        ttk.Label(self.benchmark_input_frame, text="Variables").grid(row=2, column=0, sticky="w", pady=2)
+        self.bench_3sat_variables_entry = ttk.Entry(
+            self.benchmark_input_frame,
+            textvariable=self.bench_3sat_variables,
+            width=18,
+        )
+        self.bench_3sat_variables_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Clause/var ratios").grid(row=3, column=0, sticky="w", pady=2)
+        self.bench_3sat_ratios_entry = ttk.Entry(
+            self.benchmark_input_frame,
+            textvariable=self.bench_3sat_ratios,
+            width=18,
+        )
+        self.bench_3sat_ratios_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Seed").grid(row=4, column=0, sticky="w", pady=2)
+        self.bench_3sat_seed_entry = ttk.Entry(
+            self.benchmark_input_frame,
+            textvariable=self.bench_seed,
+            width=18,
+        )
+        self.bench_3sat_seed_entry.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=2)
+        ttk.Label(self.benchmark_input_frame, text="Formula mode").grid(row=5, column=0, sticky="w", pady=2)
         mode_combo = ttk.Combobox(
             self.benchmark_input_frame,
             textvariable=self.bench_3sat_mode,
@@ -2967,22 +3117,56 @@ class SATApp:
             state="readonly",
             width=18,
         )
-        mode_combo.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.bench_3sat_mode_combo = mode_combo
+        mode_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=2)
         mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_benchmark_random_3sat_controls())
-        ttk.Label(self.benchmark_input_frame, text="SAT target % (blank=random)").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Label(self.benchmark_input_frame, text="SAT target % (blank=random)").grid(row=6, column=0, sticky="w", pady=2)
         self.bench_3sat_sat_percentage_entry = ttk.Entry(
             self.benchmark_input_frame,
             textvariable=self.bench_3sat_sat_percentage,
             width=18,
         )
-        self.bench_3sat_sat_percentage_entry.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.bench_3sat_sat_percentage_entry.grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=2)
         self._refresh_benchmark_random_3sat_controls()
 
     def _refresh_benchmark_random_3sat_controls(self) -> None:
         if not hasattr(self, "bench_3sat_sat_percentage_entry"):
             return
-        state = tk.NORMAL if self.bench_3sat_mode.get() == "Random" else tk.DISABLED
-        self.bench_3sat_sat_percentage_entry.configure(state=state)
+        preset_active = self.bench_3sat_preset.get() != RANDOM_3SAT_PRESET_CUSTOM
+        field_state = tk.DISABLED if preset_active else tk.NORMAL
+        readonly_state = tk.DISABLED if preset_active else "readonly"
+        for widget_name in (
+            "bench_3sat_variables_entry",
+            "bench_3sat_ratios_entry",
+            "bench_3sat_seed_entry",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.configure(state=field_state)
+        if hasattr(self, "bench_3sat_mode_combo"):
+            self.bench_3sat_mode_combo.configure(state=readonly_state)
+        sat_state = tk.NORMAL if self.bench_3sat_mode.get() == "Random" and not preset_active else tk.DISABLED
+        self.bench_3sat_sat_percentage_entry.configure(state=sat_state)
+
+    def _apply_random_3sat_preset(self) -> None:
+        preset = self.bench_3sat_preset.get()
+        ui_values = random_3sat_preset_ui_values(preset)
+        if ui_values is not None:
+            self.bench_3sat_variables.set(ui_values.variables)
+            self.bench_3sat_ratios.set(ui_values.ratios)
+            self.bench_seed.set(ui_values.seed)
+            self.bench_3sat_mode.set(ui_values.formula_mode)
+            self.bench_3sat_sat_percentage.set(ui_values.sat_percentage)
+
+        default_solvers = random_3sat_preset_default_solvers(preset)
+        if default_solvers:
+            self.bench_cdcl.set("CDCL" in default_solvers)
+            self.bench_dpll.set("DPLL" in default_solvers)
+            self.bench_walksat.set("WalkSAT" in default_solvers)
+            self.bench_probsat.set("ProbSAT" in default_solvers)
+
+        self.bench_3sat_preset_summary.set(random_3sat_preset_summary(preset))
+        self._refresh_benchmark_random_3sat_controls()
 
     def _build_sudoku_benchmark_form(self) -> None:
         ttk.Label(self.benchmark_input_frame, text="Sizes").grid(row=0, column=0, sticky="nw", pady=2)
@@ -3046,6 +3230,8 @@ class SATApp:
                 solvers.append("DPLL")
             if self.bench_walksat.get():
                 solvers.append("WalkSAT")
+            if self.bench_probsat.get():
+                solvers.append("ProbSAT")
             if not solvers:
                 raise ValueError("Select at least one solver")
 
@@ -3079,23 +3265,36 @@ class SATApp:
                     "timeout_seconds": timeout_seconds,
                 }
             elif self.bench_problem.get() == "Random 3-SAT":
-                seed_text = self.bench_seed.get().strip()
-                variable_counts = parse_int_list(self.bench_3sat_variables.get())
-                clause_ratios = parse_float_list(self.bench_3sat_ratios.get())
-                formula_mode = self.bench_3sat_mode.get()
-                total_runs = len(variable_counts) * len(clause_ratios) * repeats * len(solvers)
-                params = {
-                    "problem_type": "Random 3-SAT",
-                    "variable_counts": variable_counts,
-                    "clause_ratios": clause_ratios,
-                    "solvers": solvers,
-                    "repeats": repeats,
-                    "seed": int(seed_text) if seed_text else None,
-                    "formula_mode": formula_mode,
-                    "sat_percentage": self._random_3sat_sat_percentage_from_text(self.bench_3sat_sat_percentage.get()) if formula_mode == "Random" else None,
-                    "logging_options": logging_options,
-                    "timeout_seconds": timeout_seconds,
-                }
+                preset_name = self.bench_3sat_preset.get()
+                if preset_name != RANDOM_3SAT_PRESET_CUSTOM:
+                    total_runs = random_3sat_preset_case_count(preset_name) * len(solvers)
+                    params = {
+                        "problem_type": "Random 3-SAT",
+                        "preset_name": preset_name,
+                        "solvers": solvers,
+                        "repeats": 1,
+                        "logging_options": logging_options,
+                        "timeout_seconds": timeout_seconds,
+                    }
+                else:
+                    seed_text = self.bench_seed.get().strip()
+                    variable_counts = parse_int_list(self.bench_3sat_variables.get())
+                    clause_ratios = parse_float_list(self.bench_3sat_ratios.get())
+                    formula_mode = self.bench_3sat_mode.get()
+                    total_runs = len(variable_counts) * len(clause_ratios) * repeats * len(solvers)
+                    params = {
+                        "problem_type": "Random 3-SAT",
+                        "preset_name": RANDOM_3SAT_PRESET_CUSTOM,
+                        "variable_counts": variable_counts,
+                        "clause_ratios": clause_ratios,
+                        "solvers": solvers,
+                        "repeats": repeats,
+                        "seed": int(seed_text) if seed_text else None,
+                        "formula_mode": formula_mode,
+                        "sat_percentage": self._random_3sat_sat_percentage_from_text(self.bench_3sat_sat_percentage.get()) if formula_mode == "Random" else None,
+                        "logging_options": logging_options,
+                        "timeout_seconds": timeout_seconds,
+                    }
             elif self.bench_problem.get() == "Graph Suite":
                 seed_text = self.bench_seed.get().strip()
                 node_counts = parse_int_list(self.bench_nodes.get())
@@ -4002,7 +4201,9 @@ class SATApp:
         self.benchmark_figure = figure
         self.benchmark_canvas = FigureCanvasTkAgg(figure, master=self.chart_frame)
         self.benchmark_canvas.draw()
-        self.benchmark_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        chart_widget = self.benchmark_canvas.get_tk_widget()
+        chart_widget.configure(width=520, height=220)
+        chart_widget.grid(row=0, column=0, sticky="nsew")
 
     def _benchmark_bar_color(self, status: str) -> str:
         return {
@@ -4189,6 +4390,28 @@ class SATApp:
         if path:
             write_benchmark_csv(path, rows)
             messagebox.showinfo("Exported", f"Saved benchmark CSV to {path}")
+
+    def export_random_3sat_csv(self) -> None:
+        rows = [
+            row
+            for row in self._visible_benchmark_rows()
+            if row.problem_type == "Random 3-SAT"
+        ]
+        if not rows:
+            messagebox.showinfo("No Random 3-SAT data", "There are no visible Random 3-SAT rows to export.")
+            return
+
+        default_name = f"random_3sat_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        path = filedialog.asksaveasfilename(
+            initialdir=str(BENCHMARK_OUTPUT),
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+        )
+
+        if path:
+            write_random_3sat_benchmark_csv(path, rows)
+            messagebox.showinfo("Exported", f"Saved Random 3-SAT benchmark CSV to {path}")
 
     def export_benchmark_chart(self) -> None:
         if self.benchmark_figure is None:
