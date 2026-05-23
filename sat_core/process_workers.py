@@ -41,7 +41,7 @@ from sat_core.benchmark import (
 )
 from sat_core.dimacs import clauses_to_dimacs
 from sat_core.models import ProblemInstance
-from sat_core.random_3sat_presets import RANDOM_3SAT_PRESET_CUSTOM
+from sat_core.benchmark_presets.random_3sat_presets import RANDOM_3SAT_PRESET_CUSTOM
 from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_PROGRESS, EVENT_RESULT, RunEvent, RunToken
 from sat_core.solver_runner import solve_problem
 

@@ -34,7 +34,7 @@ from problems.n_queens import n_queens_problem
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.models import BENCHMARK_HEADERS, BenchmarkRow, ProblemInstance, SolveResult
-from sat_core.random_3sat_presets import (
+from sat_core.benchmark_presets.random_3sat_presets import (
     RANDOM_3SAT_PRESET_A,
     RANDOM_3SAT_PRESET_B,
     RANDOM_3SAT_PRESET_C,
@@ -61,6 +61,7 @@ from utils.graph_utils import generate_random_graph, generate_random_graph_exact
 
 
 SUDOKU_BENCHMARK_SIZES = (4, 9, 16, 25)
+MAX_STORED_BENCHMARK_CLAUSES = 50_000
 RANDOM_3SAT_CSV_HEADERS = [
     "problem_mode",
     "n_vars",
@@ -82,8 +83,17 @@ RANDOM_3SAT_CSV_HEADERS = [
 ]
 
 
+def stored_benchmark_clauses(problem: ProblemInstance) -> list[list[int]]:
+    if problem.clause_count > MAX_STORED_BENCHMARK_CLAUSES:
+        return []
+    return [clause[:] for clause in problem.clauses]
+
+
 def result_to_row(problem: ProblemInstance, result: SolveResult, repeat: int) -> BenchmarkRow:
     stats = result.stats or {}
+    metadata = dict(problem.metadata)
+    if problem.clause_count > MAX_STORED_BENCHMARK_CLAUSES:
+        metadata["cnf_storage"] = f"skipped; {problem.clause_count} clauses exceeds {MAX_STORED_BENCHMARK_CLAUSES}"
     return BenchmarkRow(
         case_name=problem.name,
         problem_type=problem.problem_type,
@@ -105,8 +115,8 @@ def result_to_row(problem: ProblemInstance, result: SolveResult, repeat: int) ->
         decoded=result.decoded,
         seed=problem.metadata.get("seed", "-"),
         solver_options=stats.get("solver_options", ""),
-        problem_metadata=dict(problem.metadata),
-        problem_clauses=[clause[:] for clause in problem.clauses],
+        problem_metadata=metadata,
+        problem_clauses=stored_benchmark_clauses(problem),
         flips=stats.get("flips", "-"),
         tries=stats.get("tries", "-"),
         best_unsatisfied=stats.get("best_unsatisfied", "-"),

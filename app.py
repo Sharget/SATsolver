@@ -4,6 +4,7 @@ import queue
 import threading
 import multiprocessing as mp
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +50,7 @@ from sat_core.benchmark import SUDOKU_BENCHMARK_SIZES, write_benchmark_csv, writ
 from sat_core.dimacs import clauses_to_dimacs, load_dimacs, save_dimacs
 from sat_core.models import BenchmarkRow, ProblemInstance
 from sat_core.process_workers import benchmark_process, generate_cnf_process, solve_process
-from sat_core.random_3sat_presets import (
+from sat_core.benchmark_presets.random_3sat_presets import (
     RANDOM_3SAT_PRESET_CUSTOM,
     random_3sat_preset_case_count,
     random_3sat_preset_default_solvers,
@@ -78,6 +79,15 @@ SUDOKU_SIZES = (4, 9, 16, 25)
 PROBLEM_KINDS = ("Sudoku", "Graph Coloring", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique", "DIMACS/CNF")
 BENCHMARK_PROBLEMS = ("Graph Coloring", "Graph Suite", "Sudoku", "N-Queens", "Random 3-SAT", "Hamiltonian Path", "Independent Set", "Clique")
 GRAPH_PROBLEM_KINDS = ("Graph Coloring", "Hamiltonian Path", "Independent Set", "Clique")
+SOLVE_SOLVERS = tuple(solver for solver in SOLVERS if solver != "ProbSAT")
+CNF_AUTO_DISPLAY_MAX_CHARS = 200_000
+FEED_MAX_LINES = 50
+BENCHMARK_AUTO_CHART_MAX_ROWS = 120
+BENCHMARK_LEFT_PANEL_WIDTH = 415
+BENCHMARK_DETAIL_PANEL_WIDTH = 320
+UI_EVENT_POLL_MS = 15
+UI_EVENT_BATCH_MAX = 25
+UI_EVENT_BATCH_SECONDS = 0.006
 PROBLEM_DESCRIPTIONS = {
     "Sudoku": "Fill an n x n grid so each row, column, and square box contains every value exactly once.",
     "Graph Coloring": "Assign one of k colors to each node so adjacent nodes never share the same color.",
@@ -150,10 +160,12 @@ class SATApp:
 
         self.current_problem: ProblemInstance | None = None
         self.latest_solve_result = None
+        self.current_cnf_dimacs = ""
         self.benchmark_rows: list[BenchmarkRow] = []
         self.benchmark_row_by_item = {}
         self.benchmark_canvas = None
         self.benchmark_figure = None
+        self.benchmark_chart_message = None
         self.benchmark_detail_canvas = None
         self.solve_detail_canvas = None
         self.selected_benchmark_row: BenchmarkRow | None = None
@@ -166,6 +178,12 @@ class SATApp:
         self.benchmark_filter_run_label: str | tuple[str, ...] | None = None
         self.pending_benchmark_chart_after_id = None
         self.updating_job_selection = False
+        self.batching_run_events = False
+        self.job_buttons_refresh_needed = False
+        self.feed_entries: list[tuple[str, str | None, str]] = []
+        self.pending_feed_messages: list[tuple[str | None, str]] = []
+        self.feed_filter_job_id: str | None = None
+        self.muted_feed_job_ids: set[str] = set()
 
         self._configure_styles()
         self._build_layout()
@@ -217,6 +235,15 @@ class SATApp:
         self._build_solve_tab()
         self._build_benchmark_tab()
         self._build_runtime_panel()
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed, add="+")
+
+    def _on_notebook_tab_changed(self, _event=None) -> None:
+        try:
+            selected_tab = self.notebook.nametowidget(self.notebook.select())
+        except tk.TclError:
+            return
+        if selected_tab is self.benchmark_tab:
+            self.root.after_idle(self._set_initial_benchmark_sash)
 
     def _build_tab(self, title: str) -> ttk.Frame:
         tab = ttk.Frame(self.notebook, padding=10)
@@ -362,7 +389,54 @@ class SATApp:
 
         self.run_status = tk.StringVar(value="Ready")
         self.progress_value = tk.DoubleVar(value=0)
-        ttk.Button(panel, text="Clear Feed", command=self.clear_feed).grid(row=0, column=0, sticky="e")
+        self.progress_percent = tk.StringVar(value="0%")
+        runtime_header = ttk.Frame(panel)
+        runtime_header.grid(row=0, column=0, columnspan=2, sticky="ew")
+        runtime_header.columnconfigure(1, weight=1)
+        ttk.Label(runtime_header, textvariable=self.run_status).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.run_progress_bar = ttk.Progressbar(
+            runtime_header,
+            variable=self.progress_value,
+            maximum=100,
+            mode="determinate",
+        )
+        self.run_progress_bar.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ttk.Label(runtime_header, textvariable=self.progress_percent, width=5, anchor="e").grid(row=0, column=2, sticky="e", padx=(0, 10))
+        feed_controls = ttk.Frame(runtime_header)
+        feed_controls.grid(row=0, column=3, sticky="e")
+        self.feed_show_all_button = ttk.Button(
+            feed_controls,
+            text="All Logs",
+            command=self.show_all_feed_logs,
+            state=tk.DISABLED,
+        )
+        self.feed_show_selected_button = ttk.Button(
+            feed_controls,
+            text="Selected Logs",
+            command=self.show_selected_job_feed_logs,
+            state=tk.DISABLED,
+        )
+        self.feed_mute_selected_button = ttk.Button(
+            feed_controls,
+            text="Mute Selected",
+            command=self.toggle_selected_job_feed_muted,
+            state=tk.DISABLED,
+        )
+        self.feed_unmute_all_button = ttk.Button(
+            feed_controls,
+            text="Unmute All",
+            command=self.unmute_all_feed_logs,
+            state=tk.DISABLED,
+        )
+        self.feed_clear_button = ttk.Button(feed_controls, text="Clear Feed", command=self.clear_feed)
+        self.feed_status = tk.StringVar(value="Logs: all visible")
+        self.feed_status_label = ttk.Label(feed_controls, textvariable=self.feed_status)
+        self.feed_show_all_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.feed_show_selected_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.feed_mute_selected_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.feed_unmute_all_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.feed_clear_button.pack(side=tk.LEFT)
+        self.feed_status_label.pack(side=tk.LEFT, padx=(8, 0))
 
         self.feed_text = tk.Text(panel, height=7, wrap="word", state=tk.DISABLED)
         self.feed_text.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -371,22 +445,157 @@ class SATApp:
         self.feed_text.configure(yscrollcommand=feed_scroll.set)
 
     def clear_feed(self) -> None:
+        self.feed_entries = []
+        self.pending_feed_messages = []
+        self._render_feed()
+
+    def append_feed(self, message: str, job_id: str | None = None) -> None:
+        if job_id is not None and job_id in self.muted_feed_job_ids:
+            return
+        if self.batching_run_events:
+            self.pending_feed_messages.append((job_id, message))
+            return
+        self._append_feed_entries([(job_id, message)])
+
+    def _append_feed_entries(self, entries: list[tuple[str | None, str]]) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        for job_id, message in entries:
+            if job_id is not None and job_id in self.muted_feed_job_ids:
+                continue
+            self.feed_entries.append((timestamp, job_id, message))
+        if len(self.feed_entries) > FEED_MAX_LINES:
+            self.feed_entries = self.feed_entries[-FEED_MAX_LINES:]
+        self._render_feed()
+
+    def _flush_pending_feed_messages(self) -> None:
+        if not self.pending_feed_messages:
+            return
+        self._append_feed_entries(self.pending_feed_messages[-FEED_MAX_LINES:])
+        self.pending_feed_messages = []
+
+    def _render_feed(self) -> None:
         self.feed_text.configure(state=tk.NORMAL)
         self.feed_text.delete("1.0", tk.END)
-        self.feed_text.configure(state=tk.DISABLED)
-
-    def append_feed(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.feed_text.configure(state=tk.NORMAL)
-        self.feed_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        for timestamp, job_id, message in self.feed_entries:
+            if self.feed_filter_job_id is not None and job_id != self.feed_filter_job_id:
+                continue
+            self.feed_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.feed_text.see(tk.END)
         self.feed_text.configure(state=tk.DISABLED)
+
+    def show_all_feed_logs(self) -> None:
+        self.feed_filter_job_id = None
+        self._render_feed()
+        self._refresh_feed_controls()
+
+    def show_selected_job_feed_logs(self) -> None:
+        if self.selected_job_id is None:
+            return
+        self.feed_filter_job_id = self.selected_job_id
+        self._render_feed()
+        self._refresh_feed_controls()
+
+    def toggle_selected_job_feed_muted(self) -> None:
+        jobs = self._selected_feed_jobs()
+        if not jobs:
+            return
+        job_ids = {job.job_id for job in jobs}
+        should_unmute = all(job_id in self.muted_feed_job_ids for job_id in job_ids)
+        if should_unmute:
+            self.muted_feed_job_ids.difference_update(job_ids)
+        else:
+            self.muted_feed_job_ids.update(job_ids)
+            self.feed_entries = [
+                entry
+                for entry in self.feed_entries
+                if entry[1] not in job_ids
+            ]
+            self.pending_feed_messages = [
+                entry
+                for entry in self.pending_feed_messages
+                if entry[0] not in job_ids
+            ]
+        for job in jobs:
+            self._update_job_row(job)
+        self._render_feed()
+        self._refresh_feed_controls()
+
+    def unmute_all_feed_logs(self) -> None:
+        muted_job_ids = set(self.muted_feed_job_ids)
+        self.muted_feed_job_ids.clear()
+        for job_id in muted_job_ids:
+            job = self.jobs.get(job_id)
+            if job is not None:
+                self._update_job_row(job)
+        self._refresh_feed_controls()
+
+    def _forget_job_feed(self, job_id: str) -> None:
+        self.muted_feed_job_ids.discard(job_id)
+        if self.feed_filter_job_id == job_id:
+            self.feed_filter_job_id = None
+        self.feed_entries = [
+            entry
+            for entry in self.feed_entries
+            if entry[1] != job_id
+        ]
+        self.pending_feed_messages = [
+            entry
+            for entry in self.pending_feed_messages
+            if entry[0] != job_id
+        ]
+        if hasattr(self, "feed_text"):
+            self._render_feed()
+
+    def _refresh_feed_controls(self) -> None:
+        if not hasattr(self, "feed_show_all_button"):
+            return
+        selected = self.selected_job_id in self.jobs if self.selected_job_id else False
+        if self.feed_filter_job_id is not None and self.feed_filter_job_id not in self.jobs:
+            self.feed_filter_job_id = None
+            self._render_feed()
+        self.feed_show_all_button.configure(state=tk.NORMAL if self.feed_filter_job_id is not None else tk.DISABLED)
+        self.feed_show_selected_button.configure(state=tk.NORMAL if selected else tk.DISABLED)
+        self.feed_mute_selected_button.configure(state=tk.NORMAL if selected else tk.DISABLED)
+        self.feed_unmute_all_button.configure(state=tk.NORMAL if self.muted_feed_job_ids else tk.DISABLED)
+        selected_jobs = self._selected_feed_jobs()
+        selected_job_ids = {job.job_id for job in selected_jobs}
+        muted = bool(selected_job_ids) and selected_job_ids.issubset(self.muted_feed_job_ids)
+        self.feed_mute_selected_button.configure(text="Unmute Selected" if muted else "Mute Selected")
+        if self.feed_filter_job_id is not None:
+            job = self.jobs.get(self.feed_filter_job_id)
+            scope = f"selected {job.label}" if job is not None else "selected job"
+        else:
+            scope = "all"
+        muted_count = len(self.muted_feed_job_ids)
+        muted_text = f", {muted_count} muted" if muted_count else ", none muted"
+        if len(selected_jobs) > 1:
+            selected_text = "selected muted" if muted else "some selected unmuted"
+        else:
+            selected_text = "selected muted" if muted else "selected unmuted"
+        self.feed_status.set(f"Logs: {scope}{muted_text}; {selected_text}" if selected else f"Logs: {scope}{muted_text}")
 
     def _selected_job(self) -> RunJob | None:
         return self.jobs.get(self.selected_job_id) if self.selected_job_id else None
 
     def _selected_solve_job(self) -> RunJob | None:
         return self.jobs.get(self.selected_solve_job_id) if self.selected_solve_job_id else None
+
+    def _selected_solve_jobs(self) -> list[RunJob]:
+        table = getattr(self, "solve_jobs_table", None)
+        if table is None:
+            job = self._selected_solve_job()
+            return [job] if job is not None else []
+        selected_ids = set(table.selection())
+        if not selected_ids:
+            job = self._selected_solve_job()
+            return [job] if job is not None else []
+        jobs = []
+        for job_id in table.get_children():
+            if job_id in selected_ids:
+                job = self.jobs.get(job_id)
+                if job is not None and self._job_kind_group(job) == "solve":
+                    jobs.append(job)
+        return jobs
 
     def _selected_benchmark_job(self) -> RunJob | None:
         return self.jobs.get(self.selected_benchmark_job_id) if self.selected_benchmark_job_id else None
@@ -407,6 +616,14 @@ class SATApp:
                 if job is not None and job.kind == "benchmark":
                     jobs.append(job)
         return jobs
+
+    def _selected_feed_jobs(self) -> list[RunJob]:
+        selected_job = self.jobs.get(self.selected_job_id) if self.selected_job_id else None
+        if selected_job is None:
+            return []
+        if self._job_kind_group(selected_job) == "benchmark":
+            return self._selected_benchmark_jobs()
+        return self._selected_solve_jobs()
 
     def _job_kind_group(self, job: RunJob) -> str:
         return "benchmark" if job.kind == "benchmark" else "solve"
@@ -433,11 +650,17 @@ class SATApp:
         return job
 
     def _job_display_title(self, job: RunJob) -> str:
-        return f"{job.label}: {job.title}"
+        marker = "[M] " if job.job_id in self.muted_feed_job_ids else ""
+        return f"{marker}{job.label}: {job.title}"
+
+    def _job_row_tags(self, job: RunJob) -> tuple[str, ...]:
+        return ("muted",) if job.job_id in self.muted_feed_job_ids else ()
 
     def _job_progress_text(self, job: RunJob) -> str:
         if job.progress_total:
-            return f"{job.progress_current or 0}/{job.progress_total}"
+            current = job.progress_current or 0
+            percent = current * 100 / job.progress_total
+            return f"{current}/{job.progress_total} ({percent:.0f}%)"
         return "-"
 
     def _insert_job_row(self, job: RunJob) -> None:
@@ -453,6 +676,7 @@ class SATApp:
                 job.status,
                 self._job_progress_text(job),
             ),
+            tags=self._job_row_tags(job),
         )
 
     def _update_job_row(self, job: RunJob) -> None:
@@ -466,8 +690,15 @@ class SATApp:
                 job.status,
                 self._job_progress_text(job),
             ),
+            tags=self._job_row_tags(job),
         )
-        self._refresh_job_buttons()
+        self._request_job_buttons_refresh()
+
+    def _request_job_buttons_refresh(self) -> None:
+        if self.batching_run_events:
+            self.job_buttons_refresh_needed = True
+        else:
+            self._refresh_job_buttons()
 
     def _select_job(self, job_id: str) -> None:
         if job_id not in self.jobs:
@@ -483,6 +714,7 @@ class SATApp:
         if table is not None and table.exists(job_id):
             self.updating_job_selection = True
             try:
+                table.selection_remove(table.selection())
                 table.selection_set(job_id)
                 table.focus(job_id)
                 table.see(job_id)
@@ -501,7 +733,8 @@ class SATApp:
             self.selected_solve_job_id = None
             self._refresh_job_buttons()
             return
-        job_id = selected[0]
+        focused = self.solve_jobs_table.focus()
+        job_id = focused if focused in selected else selected[-1]
         self.selected_solve_job_id = job_id
         self.selected_job_id = job_id
         job = self.jobs.get(job_id)
@@ -573,19 +806,25 @@ class SATApp:
             self.clear_benchmark_table_button.configure(state=tk.NORMAL if has_benchmark_rows else tk.DISABLED)
         if hasattr(self, "benchmark_delete_job_button"):
             self.benchmark_delete_job_button.configure(state=tk.NORMAL if can_delete_benchmark else tk.DISABLED)
+        self._refresh_feed_controls()
 
         if selected_job is None:
             self.run_status.set("Ready")
-            self.progress_value.set(0)
+            self._set_runtime_progress(0)
             return
 
         self.run_status.set(selected_job.status)
         if selected_job.progress_total:
-            self.progress_value.set((selected_job.progress_current or 0) * 100 / selected_job.progress_total)
+            self._set_runtime_progress((selected_job.progress_current or 0) * 100 / selected_job.progress_total)
         elif selected_job.finished:
-            self.progress_value.set(100)
+            self._set_runtime_progress(100)
         else:
-            self.progress_value.set(0)
+            self._set_runtime_progress(0)
+
+    def _set_runtime_progress(self, percent: float) -> None:
+        percent = max(0.0, min(100.0, float(percent)))
+        self.progress_value.set(percent)
+        self.progress_percent.set(f"{percent:.0f}%")
 
     def _queue_event(self, event: RunEvent) -> None:
         self.event_queue.put(event)
@@ -601,7 +840,7 @@ class SATApp:
         job.token = token
         job.status = "Running"
         self._update_job_row(job)
-        self.append_feed(self._job_display_title(job))
+        self.append_feed(self._job_display_title(job), job.job_id)
 
         def wrapped() -> None:
             try:
@@ -636,7 +875,7 @@ class SATApp:
         job.cancel_event = cancel_event
         job.status = "Running"
         self._update_job_row(job)
-        self.append_feed(self._job_display_title(job))
+        self.append_feed(self._job_display_title(job), job.job_id)
 
         def supervise() -> None:
             try:
@@ -685,7 +924,7 @@ class SATApp:
 
         job.status = "Cancelling..."
         self._update_job_row(job)
-        self.append_feed(f"{job.label}: Cancel requested; stopping after current solver checkpoint.")
+        self.append_feed(f"{job.label}: Cancel requested; stopping after current solver checkpoint.", job.job_id)
         self.root.after(1500, lambda job_id=job.job_id: self._terminate_process_if_needed(job_id))
 
     def skip_current_benchmark_case(self) -> None:
@@ -696,13 +935,13 @@ class SATApp:
         job.skip_event.set()
         job.status = "Skipping current benchmark case..."
         self._update_job_row(job)
-        self.append_feed(f"{job.label}: Skip requested; current benchmark case will be marked SKIPPED at the next solver checkpoint.")
+        self.append_feed(f"{job.label}: Skip requested; current benchmark case will be marked SKIPPED at the next solver checkpoint.", job.job_id)
 
     def _terminate_process_if_needed(self, job_id: str) -> None:
         job = self.jobs.get(job_id)
         process = job.process if job is not None else None
         if process is not None and process.is_alive():
-            self.append_feed(f"{job.label}: Worker still running; terminating process.")
+            self.append_feed(f"{job.label}: Worker still running; terminating process.", job.job_id)
             process.terminate()
 
     def clear_finished_jobs(self) -> None:
@@ -742,6 +981,7 @@ class SATApp:
                 table.delete(job.job_id)
             if job.job_id in self.jobs:
                 del self.jobs[job.job_id]
+            self._forget_job_feed(job.job_id)
 
         if self.selected_job_id in deleted_ids:
             self.selected_job_id = None
@@ -780,6 +1020,7 @@ class SATApp:
             self._set_benchmark_status(f"Deleted {job.label}.")
 
         del self.jobs[job.job_id]
+        self._forget_job_feed(job.job_id)
 
         if remove_benchmark_rows:
             self._fill_benchmark_table()
@@ -788,21 +1029,38 @@ class SATApp:
 
     def _clear_finished_jobs_for_group(self, group: str) -> None:
         removed_selected = False
+        removed_benchmark_labels = set()
+        removed_selected_solve = False
         for job_id, job in list(self.jobs.items()):
             if not job.finished or self._job_kind_group(job) != group:
                 continue
             removed_selected = removed_selected or job_id == self.selected_job_id
             if group == "solve" and job_id == self.selected_solve_job_id:
                 self.selected_solve_job_id = None
+                removed_selected_solve = True
             if group == "benchmark" and job_id == self.selected_benchmark_job_id:
                 self.selected_benchmark_job_id = None
+            if group == "benchmark":
+                removed_benchmark_labels.add(job.label)
             table = self._job_table_for_group(group)
             if table is not None and table.exists(job_id):
                 table.delete(job_id)
             del self.jobs[job_id]
+            self._forget_job_feed(job_id)
 
         if removed_selected:
             self.selected_job_id = None
+        if removed_selected_solve:
+            self._clear_solve_view()
+        if removed_benchmark_labels:
+            self.benchmark_rows = [
+                row
+                for row in self.benchmark_rows
+                if row.run_label not in removed_benchmark_labels
+            ]
+            self._remove_benchmark_filter_labels(removed_benchmark_labels)
+            self._fill_benchmark_table()
+            self._schedule_benchmark_chart_refresh()
         self._refresh_job_buttons()
 
     def load_selected_solve_job(self) -> None:
@@ -814,31 +1072,42 @@ class SATApp:
     def _clear_solve_view(self) -> None:
         self.current_problem = None
         self.latest_solve_result = None
+        self.current_cnf_dimacs = ""
         self.cnf_text.delete("1.0", tk.END)
         self._write_result("Generate or solve a problem to see results.")
         self._refresh_solve_detail_panel()
 
     def _poll_run_events(self) -> None:
         processed = 0
+        deadline = time.perf_counter() + UI_EVENT_BATCH_SECONDS
+        self.batching_run_events = True
 
-        while processed < 50:
-            try:
-                event = self.event_queue.get_nowait()
-            except queue.Empty:
-                break
+        try:
+            while processed < UI_EVENT_BATCH_MAX and time.perf_counter() < deadline:
+                try:
+                    event = self.event_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            self._handle_run_event(event)
-            processed += 1
+                self._handle_run_event(event)
+                processed += 1
+        finally:
+            self.batching_run_events = False
+            self._flush_pending_feed_messages()
+            if self.job_buttons_refresh_needed:
+                self.job_buttons_refresh_needed = False
+                self._refresh_job_buttons()
 
-        self.root.after(30, self._poll_run_events)
+        self.root.after(UI_EVENT_POLL_MS, self._poll_run_events)
 
     def _handle_run_event(self, event: RunEvent) -> None:
         job_id = event.payload.get("_job_id")
         job = self.jobs.get(job_id) if job_id else None
         prefix = f"{job.label}: " if job is not None else ""
+        feed_job_id = job.job_id if job is not None else None
 
         if event.type == EVENT_LOG:
-            self.append_feed(f"{prefix}{event.message}")
+            self.append_feed(f"{prefix}{event.message}", feed_job_id)
             return
 
         if event.type == EVENT_PROGRESS:
@@ -854,7 +1123,7 @@ class SATApp:
                 self.benchmark_rows.append(row)
                 if self._benchmark_row_is_visible(row):
                     self._insert_benchmark_row(row)
-                self._refresh_job_buttons()
+                self._request_job_buttons_refresh()
             self._apply_progress(event, job)
             return
 
@@ -877,13 +1146,13 @@ class SATApp:
                     self.latest_solve_result = result
                     self._write_result(self._format_solve_result(result))
                     self._refresh_solve_detail_panel()
-                    self.progress_value.set(100)
+                    self._set_runtime_progress(100)
             return
 
         if event.type == EVENT_ERROR:
             if job is not None and job.finished:
                 return
-            self.append_feed(f"{prefix}ERROR: {event.message}")
+            self.append_feed(f"{prefix}ERROR: {event.message}", feed_job_id)
             if job is not None:
                 self._finish_job(job, "Failed")
             messagebox.showerror("Run failed", event.message)
@@ -892,7 +1161,7 @@ class SATApp:
         if event.type == EVENT_CANCELLED:
             if job is not None and job.finished:
                 return
-            self.append_feed(f"{prefix}{event.message or 'Run cancelled.'}")
+            self.append_feed(f"{prefix}{event.message or 'Run cancelled.'}", feed_job_id)
             if job is not None:
                 self._finish_job(job, "Cancelled")
             return
@@ -900,7 +1169,7 @@ class SATApp:
         if event.type == EVENT_DONE:
             if job is not None and job.finished:
                 return
-            self.append_feed(f"{prefix}{event.message or 'Run finished.'}")
+            self.append_feed(f"{prefix}{event.message or 'Run finished.'}", feed_job_id)
             if job is not None:
                 self._finish_job(job, "Done")
 
@@ -914,7 +1183,7 @@ class SATApp:
             return
 
         if event.total:
-            self.progress_value.set((event.current or 0) * 100 / event.total)
+            self._set_runtime_progress((event.current or 0) * 100 / event.total)
         if event.message:
             self.run_status.set(event.message)
 
@@ -930,10 +1199,10 @@ class SATApp:
 
         if job.pending_chart_refresh:
             job.pending_chart_refresh = False
-            if len(self.benchmark_rows) <= 120:
+            if len(self.benchmark_rows) <= BENCHMARK_AUTO_CHART_MAX_ROWS:
                 self._schedule_benchmark_chart_refresh()
             else:
-                self.append_feed(f"{job.label}: Chart auto-refresh skipped for a large benchmark; use Refresh Chart when you are ready.")
+                self.append_feed(f"{job.label}: Chart auto-refresh skipped for a large benchmark; use Refresh Chart when you are ready.", job.job_id)
 
     def _apply_cnf_event(self, event: RunEvent, job: RunJob | None = None) -> None:
         payload = event.payload
@@ -954,16 +1223,14 @@ class SATApp:
 
         self.current_problem = problem
         self.latest_solve_result = None
-        self.cnf_text.delete("1.0", tk.END)
-        self.cnf_text.insert("1.0", payload["dimacs"])
+        self._set_cnf_preview(payload["dimacs"])
         self._write_result(f"Generated {self.current_problem.clause_count} clauses for {self.current_problem.name}.")
         self._refresh_solve_detail_panel()
 
     def _display_solve_job(self, job: RunJob) -> None:
         self.current_problem = job.problem
         self.latest_solve_result = job.result
-        self.cnf_text.delete("1.0", tk.END)
-        self.cnf_text.insert("1.0", job.dimacs)
+        self._set_cnf_preview(job.dimacs)
 
         if job.result is not None:
             self._write_result(self._format_solve_result(job.result))
@@ -973,6 +1240,30 @@ class SATApp:
             self._write_result("Waiting for CNF generation...")
 
         self._refresh_solve_detail_panel()
+
+    def _set_cnf_preview(self, dimacs: str, *, force: bool = False) -> None:
+        self.current_cnf_dimacs = dimacs
+        self.cnf_text.delete("1.0", tk.END)
+        if not dimacs:
+            return
+        if force or len(dimacs) <= CNF_AUTO_DISPLAY_MAX_CHARS:
+            self.cnf_text.insert("1.0", dimacs)
+            return
+
+        size_kb = len(dimacs) / 1024
+        self.cnf_text.insert(
+            "1.0",
+            (
+                f"CNF preview skipped ({size_kb:.1f} KB, {len(dimacs):,} characters).\n"
+                "Use Refresh CNF Preview when you want to load the full DIMACS text."
+            ),
+        )
+
+    def refresh_cnf_preview(self) -> None:
+        if not self.current_cnf_dimacs:
+            self._write_result("Generate, load, or select a CNF before refreshing the preview.")
+            return
+        self._set_cnf_preview(self.current_cnf_dimacs, force=True)
 
     def _build_solve_tab(self) -> None:
         self.problem_kind = tk.StringVar(value="Sudoku")
@@ -1030,13 +1321,14 @@ class SATApp:
         self.solve_button.grid(row=0, column=1, sticky="w", padx=(0, 6))
         self.solve_toolbar_cancel_button.grid(row=0, column=2, sticky="w", padx=(0, 12))
         ttk.Label(toolbar, text="Solver").grid(row=0, column=3, sticky="w")
-        ttk.Combobox(
+        self.solve_solver_box = ttk.Combobox(
             toolbar,
             textvariable=self.solver_name,
-            values=SOLVERS,
+            values=SOLVE_SOLVERS,
             state="readonly",
             width=12,
-        ).grid(row=0, column=4, sticky="w", padx=(6, 12))
+        )
+        self.solve_solver_box.grid(row=0, column=4, sticky="w", padx=(6, 12))
         ttk.Label(toolbar, text="Timeout").grid(row=0, column=5, sticky="w")
         ttk.Entry(toolbar, textvariable=self.solve_timeout_seconds, width=7).grid(row=0, column=6, sticky="w", padx=(6, 12))
         self.save_cnf_button.grid(row=0, column=7, sticky="w", padx=(0, 6))
@@ -1143,15 +1435,23 @@ class SATApp:
         result_frame = ttk.LabelFrame(self.solve_result_pane, text="Result", padding=6)
         self.solve_result_pane.add(cnf_frame, weight=2)
         self.solve_result_pane.add(result_frame, weight=1)
-        cnf_frame.rowconfigure(0, weight=1)
+        cnf_frame.rowconfigure(1, weight=1)
         cnf_frame.columnconfigure(0, weight=1)
         result_frame.rowconfigure(0, weight=1)
         result_frame.columnconfigure(0, weight=1)
 
+        cnf_tools = ttk.Frame(cnf_frame)
+        cnf_tools.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.refresh_cnf_button = ttk.Button(
+            cnf_tools,
+            text="Refresh CNF Preview",
+            command=self.refresh_cnf_preview,
+        )
+        self.refresh_cnf_button.pack(side=tk.RIGHT)
         self.cnf_text = tk.Text(cnf_frame, height=22, wrap="none")
-        self.cnf_text.grid(row=0, column=0, sticky="nsew")
+        self.cnf_text.grid(row=1, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(cnf_frame, orient=tk.VERTICAL, command=self.cnf_text.yview)
-        yscroll.grid(row=0, column=1, sticky="ns")
+        yscroll.grid(row=1, column=1, sticky="ns")
         self.cnf_text.configure(yscrollcommand=yscroll.set)
 
         self.result_text = tk.Text(result_frame, height=13, wrap="word")
@@ -1217,12 +1517,13 @@ class SATApp:
         panel.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         panel.columnconfigure(0, weight=1)
 
-        compact_widths = {"label": 130, "status": 82, "progress": 64}
+        compact_widths = {"label": 130, "status": 82, "progress": 82}
         self.solve_jobs_table = self._build_job_table(
             panel,
             self._on_solve_job_selected,
             height=3,
             widths=compact_widths,
+            selectmode="extended",
         )
         solve_scroll = ttk.Scrollbar(panel, orient=tk.VERTICAL, command=self.solve_jobs_table.yview)
         self.solve_jobs_table.configure(yscrollcommand=solve_scroll.set)
@@ -1285,11 +1586,12 @@ class SATApp:
         widths = widths or {
             "label": 210,
             "status": 120,
-            "progress": 80,
+            "progress": 96,
         }
         for column in ("label", "status", "progress"):
             table.heading(column, text=headings[column])
             table.column(column, width=widths[column])
+        table.tag_configure("muted", foreground="#6b7280")
         table.bind("<<TreeviewSelect>>", select_callback)
         return table
 
@@ -2151,7 +2453,7 @@ class SATApp:
             seed=metadata.get("seed", "-"),
             solver_options=stats.get("solver_options", ""),
             problem_metadata=dict(metadata),
-            problem_clauses=[clause[:] for clause in self.current_problem.clauses],
+            problem_clauses=self.current_problem.clauses,
         )
 
     def _problem_detail_text(self, problem: ProblemInstance) -> str:
@@ -2332,8 +2634,7 @@ class SATApp:
             self.dimacs_input.insert("1.0", text)
             self.current_problem = dimacs_problem_from_text(text, name=Path(path).name, problem_type=chosen_type)
             self.latest_solve_result = None
-            self.cnf_text.delete("1.0", tk.END)
-            self.cnf_text.insert("1.0", text)
+            self._set_cnf_preview(text)
             self._write_result(f"Loaded {len(clauses)} clauses from {path}\nType: {chosen_type}")
             self._refresh_solve_detail_panel()
         except Exception as exc:
@@ -2546,6 +2847,11 @@ class SATApp:
         left_shell = ttk.Frame(workspace)
         center = ttk.Frame(workspace)
         detail_shell = ttk.Frame(workspace)
+        left_shell.configure(width=BENCHMARK_LEFT_PANEL_WIDTH)
+        detail_shell.configure(width=BENCHMARK_DETAIL_PANEL_WIDTH)
+        self.benchmark_left_shell = left_shell
+        self.benchmark_detail_shell = detail_shell
+        self.benchmark_sash_initialized = False
         workspace.add(left_shell, weight=0)
         workspace.add(center, weight=1)
         workspace.add(detail_shell, weight=0)
@@ -2706,6 +3012,23 @@ class SATApp:
 
         self._refresh_benchmark_form()
         self._refresh_benchmark_log_controls()
+
+    def _set_initial_benchmark_sash(self) -> None:
+        if not hasattr(self, "benchmark_workspace") or self.benchmark_sash_initialized:
+            return
+        try:
+            self.benchmark_workspace.update_idletasks()
+            total_width = self.benchmark_workspace.winfo_width()
+            if total_width <= 1:
+                return
+            left_width = min(BENCHMARK_LEFT_PANEL_WIDTH, max(260, total_width - BENCHMARK_DETAIL_PANEL_WIDTH - 260))
+            self.benchmark_workspace.sashpos(0, left_width)
+            if len(self.benchmark_workspace.panes()) >= 3:
+                detail_start = max(left_width + 260, total_width - BENCHMARK_DETAIL_PANEL_WIDTH)
+                self.benchmark_workspace.sashpos(1, detail_start)
+            self.benchmark_sash_initialized = True
+        except tk.TclError:
+            pass
 
     def _build_benchmark_action_buttons(self, row: int) -> None:
         actions = ttk.LabelFrame(self.benchmark_controls, text="Actions", padding=6)
@@ -3433,14 +3756,42 @@ class SATApp:
         if hasattr(self, "benchmark_status"):
             self.benchmark_status.set(message)
 
-    def _schedule_benchmark_chart_refresh(self) -> None:
+    def _clear_benchmark_chart(self, message: str | None = None) -> None:
+        if self.benchmark_canvas is not None:
+            self.benchmark_canvas.get_tk_widget().destroy()
+            self.benchmark_canvas = None
+            self.benchmark_figure = None
+        if self.benchmark_chart_message is not None:
+            self.benchmark_chart_message.destroy()
+            self.benchmark_chart_message = None
+        if message:
+            self.benchmark_chart_message = ttk.Label(
+                self.chart_frame,
+                text=message,
+                justify="center",
+                wraplength=460,
+            )
+            self.benchmark_chart_message.grid(row=0, column=0, sticky="nsew")
+
+    def _schedule_benchmark_chart_refresh(self, *, allow_large_auto: bool = False) -> bool:
         if self.pending_benchmark_chart_after_id is not None:
             try:
                 self.root.after_cancel(self.pending_benchmark_chart_after_id)
             except tk.TclError:
                 pass
+            self.pending_benchmark_chart_after_id = None
+        visible_count = len(self._visible_benchmark_rows())
+        if not allow_large_auto and visible_count > BENCHMARK_AUTO_CHART_MAX_ROWS:
+            self._clear_benchmark_chart(
+                f"Chart skipped for {visible_count} rows. Use Refresh Chart when you want to render it."
+            )
+            self._set_benchmark_status(
+                f"Showing {self._benchmark_filter_label_text()} ({visible_count} rows); chart refresh skipped."
+            )
+            return False
         self._set_benchmark_status("Drawing chart...")
         self.pending_benchmark_chart_after_id = self.root.after(50, self._run_deferred_benchmark_chart_refresh)
+        return True
 
     def _run_deferred_benchmark_chart_refresh(self) -> None:
         self.pending_benchmark_chart_after_id = None
@@ -3494,8 +3845,12 @@ class SATApp:
         if self.selected_job_id == self.selected_benchmark_job_id:
             self.selected_job_id = None
         self.selected_benchmark_job_id = None
-        self.benchmark_filter_run_label = ()
-        self._set_benchmark_status("No benchmark runs selected.")
+        self.benchmark_rows = []
+        for job in self.jobs.values():
+            if job.kind == "benchmark":
+                job.rows = []
+        self.benchmark_filter_run_label = None
+        self._set_benchmark_status("Cleared all benchmark results.")
         self._fill_benchmark_table()
         self._schedule_benchmark_chart_refresh()
         self._refresh_job_buttons()
@@ -3739,9 +4094,14 @@ class SATApp:
             f"SAT target: {sat_chance}",
             f"Selected: {metadata.get('selected_mode', '-')}",
             f"Seed: {row.seed}",
-            "",
-            "First clauses:",
         ]
+        if not row.problem_clauses:
+            storage = metadata.get("cnf_storage")
+            if storage:
+                lines.extend(["", f"CNF clauses not stored for this benchmark row ({storage})."])
+            return "\n".join(lines)
+
+        lines.extend(["", "First clauses:"])
         shown = row.problem_clauses[:20]
         lines.extend(" ".join(str(lit) for lit in clause) for clause in shown)
         if len(row.problem_clauses) > len(shown):
@@ -4150,18 +4510,14 @@ class SATApp:
     def draw_benchmark_chart(self) -> None:
         rows = self._visible_benchmark_rows()
         if not rows:
-            if self.benchmark_canvas is not None:
-                self.benchmark_canvas.get_tk_widget().destroy()
-                self.benchmark_canvas = None
-                self.benchmark_figure = None
+            self._clear_benchmark_chart()
             return
 
         if Figure is None or FigureCanvasTkAgg is None:
             messagebox.showwarning("Charts unavailable", "Matplotlib Tk support is not available.")
             return
 
-        if self.benchmark_canvas is not None:
-            self.benchmark_canvas.get_tk_widget().destroy()
+        self._clear_benchmark_chart()
 
         figure = Figure(figsize=(7.5, 3.6), dpi=100)
         axis = figure.add_subplot(111)

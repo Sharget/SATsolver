@@ -6,8 +6,8 @@ import tkinter as tk
 import random
 
 import app as app_module
-import sat_core.random_3sat_presets as random_3sat_presets_module
-from app import BENCHMARK_PROBLEMS, PROBLEM_KINDS, SATApp, SUDOKU_SIZES
+import sat_core.benchmark_presets.random_3sat_presets as random_3sat_presets_module
+from app import BENCHMARK_AUTO_CHART_MAX_ROWS, BENCHMARK_DETAIL_PANEL_WIDTH, BENCHMARK_LEFT_PANEL_WIDTH, BENCHMARK_PROBLEMS, CNF_AUTO_DISPLAY_MAX_CHARS, FEED_MAX_LINES, PROBLEM_KINDS, SATApp, SOLVE_SOLVERS, SUDOKU_SIZES
 from problems.clique import (
     average_degree_clique_problem,
     clique_var,
@@ -30,6 +30,7 @@ from problems.n_queens import n_queens_problem, n_queens_var
 from problems.random_3sat import random_3sat_problem
 from problems.sudoku import sudoku_problem, validate_sudoku_grid
 from sat_core.benchmark import (
+    MAX_STORED_BENCHMARK_CLAUSES,
     RANDOM_3SAT_CSV_HEADERS,
     RANDOM_3SAT_PRESET_A,
     RANDOM_3SAT_PRESET_B,
@@ -50,7 +51,7 @@ from sat_core.benchmark import (
 from sat_core.dimacs import clauses_to_dimacs, parse_dimacs_text
 from sat_core.models import BenchmarkRow, ProblemInstance, SolveResult
 from sat_core.process_workers import problem_from_snapshot
-from sat_core.random_3sat_presets import (
+from sat_core.benchmark_presets.random_3sat_presets import (
     Random3SATPreset,
     Random3SATPresetSpec,
     Random3SATPresetUiValues,
@@ -62,7 +63,7 @@ from sat_core.random_3sat_presets import (
     random_3sat_preset_ui_values,
     register_random_3sat_preset,
 )
-from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_ROW, RunEvent, RunToken
+from sat_core.runtime import EVENT_CNF, EVENT_LOG, EVENT_PROGRESS, EVENT_ROW, RunEvent, RunToken
 from sat_core.solver_runner import SOLVERS, solve_clauses, solve_problem
 from utils.general_utils import color_var, sudoku_var
 from utils.graph_utils import decode_coloring, generate_random_graph_exact_edges, graph_edges
@@ -736,6 +737,16 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(row.problem_metadata["nodes"], 4)
         self.assertEqual(row.problem_clauses, problem.clauses)
 
+    def test_result_to_row_skips_oversized_benchmark_clauses(self):
+        clauses = [[index, -index - 1] for index in range(MAX_STORED_BENCHMARK_CLAUSES + 1)]
+        problem = ProblemInstance("huge", "N-Queens", clauses, {"size": 300})
+        result = SolveResult("CDCL", "SAT", 0.1, {}, stats={})
+
+        row = result_to_row(problem, result, repeat=1)
+
+        self.assertEqual(row.problem_clauses, [])
+        self.assertIn("skipped", row.problem_metadata["cnf_storage"])
+
     def test_benchmark_row_dimacs_uses_stored_clauses(self):
         app = SATApp.__new__(SATApp)
         row = BenchmarkRow(
@@ -1082,6 +1093,8 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("Graph Suite", BENCHMARK_PROBLEMS)
             self.assertIn("WalkSAT", SOLVERS)
             self.assertIn("ProbSAT", SOLVERS)
+            self.assertEqual(SOLVE_SOLVERS, ("CDCL", "DPLL", "WalkSAT"))
+            self.assertEqual(root.tk.splitlist(app.solve_solver_box.cget("values")), SOLVE_SOLVERS)
             self.assertIn("WalkSAT", app.solve_solver_guide.guide_text)
             self.assertIn("UNKNOWN", app.solve_solver_guide.guide_text)
             self.assertIn("WalkSAT", app.benchmark_solver_guide.guide_text)
@@ -1102,10 +1115,15 @@ class AppBackendTests(unittest.TestCase):
             self.assertIn("> Solve", str(app.solve_button.cget("text")))
             self.assertIn("x Cancel", str(app.solve_toolbar_cancel_button.cget("text")))
             self.assertIn("@ Refresh Chart", str(app.refresh_chart_button.cget("text")))
+            self.assertEqual(str(app.refresh_cnf_button.cget("text")), "Refresh CNF Preview")
             self.assertIn("Export CSV", str(app.export_csv_button.cget("text")))
             self.assertIn("Export 3-SAT CSV", str(app.export_3sat_csv_button.cget("text")))
             self.assertEqual(str(app.chart_metric_box.cget("state")), "readonly")
             self.assertEqual(str(app.chart_view_box.cget("state")), "readonly")
+            self.assertEqual(int(app.benchmark_left_shell.cget("width")), BENCHMARK_LEFT_PANEL_WIDTH)
+            self.assertEqual(int(app.benchmark_detail_shell.cget("width")), BENCHMARK_DETAIL_PANEL_WIDTH)
+            self.assertEqual(str(app.run_progress_bar.cget("mode")), "determinate")
+            self.assertEqual(app.progress_percent.get(), "0%")
             self.assertTrue(app.root.bind("<Control-w>"))
             self.assertTrue(hasattr(app.solve_tab, "_tab_scroll_canvas"))
             self.assertTrue(hasattr(app.benchmark_tab, "_tab_scroll_canvas"))
@@ -1305,6 +1323,158 @@ class AppBackendTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_feed_keeps_only_recent_lines(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+
+            for index in range(FEED_MAX_LINES + 5):
+                app.append_feed(f"line {index}")
+
+            feed = app.feed_text.get("1.0", tk.END)
+            self.assertNotIn("line 0", feed)
+            self.assertIn(f"line {FEED_MAX_LINES + 4}", feed)
+            self.assertLessEqual(len([line for line in feed.splitlines() if line.strip()]), FEED_MAX_LINES)
+        finally:
+            root.destroy()
+
+    def test_feed_can_show_only_selected_job_logs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("benchmark", "Second benchmark")
+            app.append_feed("first log", first.job_id)
+            app.append_feed("second log", second.job_id)
+
+            app._select_job(first.job_id)
+            app.show_selected_job_feed_logs()
+
+            feed = app.feed_text.get("1.0", tk.END)
+            self.assertIn("first log", feed)
+            self.assertNotIn("second log", feed)
+            self.assertEqual(app.feed_filter_job_id, first.job_id)
+            self.assertEqual(str(app.feed_show_all_button.cget("state")), "normal")
+
+            app.show_all_feed_logs()
+
+            feed = app.feed_text.get("1.0", tk.END)
+            self.assertIn("first log", feed)
+            self.assertIn("second log", feed)
+        finally:
+            root.destroy()
+
+    def test_feed_can_mute_and_forget_selected_job_logs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("solve", "Second solve")
+            first.finished = True
+            app.append_feed("first before mute", first.job_id)
+            app.append_feed("second stays", second.job_id)
+
+            app._select_job(first.job_id)
+            app.toggle_selected_job_feed_muted()
+            app.append_feed("first muted", first.job_id)
+
+            feed = app.feed_text.get("1.0", tk.END)
+            self.assertNotIn("first before mute", feed)
+            self.assertNotIn("first muted", feed)
+            self.assertIn("second stays", feed)
+            self.assertIn(first.job_id, app.muted_feed_job_ids)
+            self.assertEqual(str(app.feed_mute_selected_button.cget("text")), "Unmute Selected")
+            self.assertEqual(str(app.feed_unmute_all_button.cget("state")), "normal")
+            self.assertIn("1 muted", app.feed_status.get())
+            self.assertIn("selected muted", app.feed_status.get())
+
+            app.delete_selected_solve_job()
+
+            self.assertNotIn(first.job_id, app.muted_feed_job_ids)
+            self.assertNotIn("first", app.feed_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_feed_unmute_all_updates_indicator_and_future_logs(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("benchmark", "Second benchmark")
+
+            app._select_job(first.job_id)
+            app.toggle_selected_job_feed_muted()
+            app._select_job(second.job_id)
+            app.toggle_selected_job_feed_muted()
+
+            self.assertEqual(app.muted_feed_job_ids, {first.job_id, second.job_id})
+            self.assertEqual(str(app.feed_unmute_all_button.cget("state")), "normal")
+            self.assertIn("2 muted", app.feed_status.get())
+
+            app.unmute_all_feed_logs()
+            app.append_feed("first after unmute", first.job_id)
+
+            self.assertEqual(app.muted_feed_job_ids, set())
+            self.assertEqual(str(app.feed_unmute_all_button.cget("state")), "disabled")
+            self.assertIn("none muted", app.feed_status.get())
+            self.assertIn("first after unmute", app.feed_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
+    def test_solve_jobs_can_multi_select_and_show_muted_marker(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            first = app._create_job("solve", "First solve")
+            second = app._create_job("solve", "Second solve")
+
+            self.assertEqual(str(app.solve_jobs_table.cget("selectmode")), "extended")
+
+            app.solve_jobs_table.selection_set((first.job_id, second.job_id))
+            app.solve_jobs_table.focus(second.job_id)
+            app._on_solve_job_selected()
+            app.toggle_selected_job_feed_muted()
+
+            self.assertEqual(app.muted_feed_job_ids, {first.job_id, second.job_id})
+            self.assertIn("[M]", app.solve_jobs_table.item(first.job_id, "values")[0])
+            self.assertIn("[M]", app.solve_jobs_table.item(second.job_id, "values")[0])
+            self.assertIn("muted", app.solve_jobs_table.item(first.job_id, "tags"))
+            self.assertIn("muted", app.solve_jobs_table.item(second.job_id, "tags"))
+            self.assertIn("2 muted", app.feed_status.get())
+
+            app.toggle_selected_job_feed_muted()
+
+            self.assertEqual(app.muted_feed_job_ids, set())
+            self.assertNotIn("[M]", app.solve_jobs_table.item(first.job_id, "values")[0])
+            self.assertNotIn("muted", app.solve_jobs_table.item(first.job_id, "tags"))
+        finally:
+            root.destroy()
+
     def test_graph_suite_run_benchmark_builds_shared_graph_params(self):
         try:
             root = tk.Tk()
@@ -1404,6 +1574,72 @@ class AppBackendTests(unittest.TestCase):
             self.assertNotEqual(app.selected_job_id, second.job_id)
         finally:
             root.destroy()
+
+    def test_benchmark_progress_shows_percentage(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            job = app._create_job("benchmark", "Benchmark job")
+
+            app._handle_run_event(RunEvent(EVENT_PROGRESS, "Halfway", payload={"_job_id": job.job_id}, current=2, total=4))
+
+            self.assertEqual(app.benchmark_jobs_table.set(job.job_id, "progress"), "2/4 (50%)")
+            self.assertEqual(app.progress_percent.get(), "50%")
+            self.assertEqual(float(app.progress_value.get()), 50.0)
+        finally:
+            root.destroy()
+
+    def test_initial_benchmark_sash_uses_left_panel_width(self):
+        app = SATApp.__new__(SATApp)
+        calls = []
+
+        class WorkspaceStub:
+            def update_idletasks(self):
+                pass
+
+            def winfo_width(self):
+                return 1200
+
+            def panes(self):
+                return ("left", "center", "detail")
+
+            def sashpos(self, index, position):
+                calls.append((index, position))
+
+        app.benchmark_workspace = WorkspaceStub()
+        app.benchmark_sash_initialized = False
+
+        app._set_initial_benchmark_sash()
+
+        self.assertEqual(calls, [(0, BENCHMARK_LEFT_PANEL_WIDTH), (1, 1200 - BENCHMARK_DETAIL_PANEL_WIDTH)])
+        self.assertTrue(app.benchmark_sash_initialized)
+
+    def test_initial_benchmark_sash_waits_for_visible_width(self):
+        app = SATApp.__new__(SATApp)
+        calls = []
+
+        class HiddenWorkspaceStub:
+            def update_idletasks(self):
+                pass
+
+            def winfo_width(self):
+                return 1
+
+            def sashpos(self, index, position):
+                calls.append((index, position))
+
+        app.benchmark_workspace = HiddenWorkspaceStub()
+        app.benchmark_sash_initialized = False
+
+        app._set_initial_benchmark_sash()
+
+        self.assertEqual(calls, [])
+        self.assertFalse(app.benchmark_sash_initialized)
 
     def test_cancel_selected_job_does_not_cancel_other_jobs(self):
         try:
@@ -1600,21 +1836,107 @@ class AppBackendTests(unittest.TestCase):
                 app.pending_benchmark_chart_after_id = None
 
             app.clear_all_benchmark_results()
-            self.assertEqual(app.benchmark_rows, [first_row, second_row])
-            self.assertEqual(app.benchmark_filter_run_label, ())
+            self.assertEqual(app.benchmark_rows, [])
+            self.assertIsNone(app.benchmark_filter_run_label)
             self.assertEqual(app._visible_benchmark_rows(), [])
             self.assertEqual(len(app.benchmark_table.get_children()), 0)
             self.assertEqual(app.benchmark_jobs_table.selection(), ())
+            self.assertEqual(first.rows, [])
+            self.assertEqual(second.rows, [])
             if app.pending_benchmark_chart_after_id is not None:
                 app.root.after_cancel(app.pending_benchmark_chart_after_id)
                 app.pending_benchmark_chart_after_id = None
 
             app.show_all_benchmark_runs()
-            self.assertEqual(app.benchmark_rows, [first_row, second_row])
-            self.assertEqual(len(app.benchmark_table.get_children()), 2)
+            self.assertEqual(app.benchmark_rows, [])
+            self.assertEqual(len(app.benchmark_table.get_children()), 0)
             if app.pending_benchmark_chart_after_id is not None:
                 app.root.after_cancel(app.pending_benchmark_chart_after_id)
                 app.pending_benchmark_chart_after_id = None
+        finally:
+            root.destroy()
+
+    def test_show_selected_large_benchmark_run_defers_chart_refresh(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            draw_calls = []
+            app.draw_benchmark_chart = lambda: draw_calls.append(True)
+            job = app._create_job("benchmark", "Large benchmark")
+            for index in range(BENCHMARK_AUTO_CHART_MAX_ROWS + 1):
+                row = BenchmarkRow(
+                    f"case {index}",
+                    "N-Queens",
+                    "CDCL",
+                    "SAT",
+                    0.1,
+                    1,
+                    1,
+                    1,
+                )
+                app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": job.job_id, "row": row}, current=index + 1, total=BENCHMARK_AUTO_CHART_MAX_ROWS + 1))
+
+            app.benchmark_jobs_table.selection_set((job.job_id,))
+            app._on_benchmark_job_selected()
+            app.show_selected_benchmark_run()
+
+            self.assertEqual(draw_calls, [])
+            self.assertIsNone(app.pending_benchmark_chart_after_id)
+            self.assertIsNotNone(app.benchmark_chart_message)
+            self.assertIn("chart refresh skipped", app.benchmark_status.get())
+        finally:
+            root.destroy()
+
+    def test_large_cnf_preview_is_deferred_until_refresh(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            dimacs = "p cnf 1 1\n" + ("1 0\n" * ((CNF_AUTO_DISPLAY_MAX_CHARS // 4) + 10))
+
+            app._set_cnf_preview(dimacs)
+
+            preview_text = app.cnf_text.get("1.0", tk.END)
+            self.assertIn("CNF preview skipped", preview_text)
+            self.assertNotEqual(preview_text.strip(), dimacs.strip())
+            self.assertEqual(app.current_cnf_dimacs, dimacs)
+
+            app.refresh_cnf_preview()
+
+            self.assertEqual(app.cnf_text.get("1.0", tk.END).strip(), dimacs.strip())
+        finally:
+            root.destroy()
+
+    def test_solve_detail_row_reuses_large_clause_list(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            clauses = [[index, -index - 1] for index in range(2000)]
+            app.current_problem = ProblemInstance(
+                "large detail",
+                "N-Queens",
+                clauses,
+                {"size": 80, "queens": 80},
+            )
+
+            row = app._solve_detail_row()
+
+            self.assertIs(row.problem_clauses, clauses)
+            self.assertEqual(row.detail, "n=80")
         finally:
             root.destroy()
 
@@ -1766,6 +2088,34 @@ class AppBackendTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_clear_finished_solve_jobs_removes_selected_view_data(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            job = app._create_job("solve", "Finished solve")
+            job.finished = True
+            job.status = "Done"
+            job.problem = ProblemInstance("finished", "DIMACS", [[1]], {})
+            job.dimacs = "p cnf 1 1\n1 0\n"
+            app._display_solve_job(job)
+            app._select_job(job.job_id)
+
+            app.clear_finished_solve_jobs()
+
+            self.assertNotIn(job.job_id, app.jobs)
+            self.assertFalse(app.solve_jobs_table.exists(job.job_id))
+            self.assertIsNone(app.current_problem)
+            self.assertEqual(app.current_cnf_dimacs, "")
+            self.assertNotIn("p cnf 1 1", app.cnf_text.get("1.0", tk.END))
+            self.assertIn("Generate or solve", app.result_text.get("1.0", tk.END))
+        finally:
+            root.destroy()
+
     def test_delete_selected_benchmark_jobs_removes_their_rows_only(self):
         try:
             root = tk.Tk()
@@ -1801,6 +2151,34 @@ class AppBackendTests(unittest.TestCase):
             self.assertIsNone(app.benchmark_filter_run_label)
             self.assertEqual(len(app.benchmark_table.get_children()), 0)
 
+            if app.pending_benchmark_chart_after_id is not None:
+                app.root.after_cancel(app.pending_benchmark_chart_after_id)
+                app.pending_benchmark_chart_after_id = None
+        finally:
+            root.destroy()
+
+    def test_clear_finished_benchmark_jobs_removes_inaccessible_rows(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is not available: {exc}")
+
+        root.withdraw()
+        try:
+            app = SATApp(root)
+            app.draw_benchmark_chart = lambda: None
+            job = app._create_job("benchmark", "Finished benchmark")
+            job.finished = True
+            job.status = "Done"
+            row = BenchmarkRow("case one", "N-Queens", "CDCL", "SAT", 0.1, 1, 1, 1)
+            app._handle_run_event(RunEvent(EVENT_ROW, payload={"_job_id": job.job_id, "row": row}, current=1, total=1))
+
+            app.clear_finished_benchmark_jobs()
+
+            self.assertNotIn(job.job_id, app.jobs)
+            self.assertFalse(app.benchmark_jobs_table.exists(job.job_id))
+            self.assertEqual(app.benchmark_rows, [])
+            self.assertEqual(len(app.benchmark_table.get_children()), 0)
             if app.pending_benchmark_chart_after_id is not None:
                 app.root.after_cancel(app.pending_benchmark_chart_after_id)
                 app.pending_benchmark_chart_after_id = None
