@@ -4,6 +4,7 @@ import random
 
 from problems.graph_coloring import edge_count, edge_count_from_average_degree, normalize_graph, parse_edge_list
 from sat_core.models import ProblemInstance
+from utils.general_utils import readable_pair_var
 from utils.graph_utils import generate_random_graph, generate_random_graph_exact_edges, graph_edges
 
 
@@ -11,7 +12,7 @@ Graph = dict[int, list[int]]
 
 
 def clique_var(slot: int, node: int, node_count: int) -> int:
-    return (slot - 1) * node_count + node
+    return readable_pair_var(slot, node, node_count)
 
 
 def decode_clique(solution: dict[int, bool], node_count: int, target_size: int) -> dict:

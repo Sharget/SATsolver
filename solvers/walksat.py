@@ -1,3 +1,12 @@
+"""
+WalkSAT and ProbSAT-style incomplete SAT solvers.
+
+These algorithms perform local search over complete truth assignments. They
+try to reduce the number of unsatisfied clauses by flipping variables chosen
+from currently unsatisfied clauses. Finding an assignment with zero unsatisfied
+clauses proves SAT, but exhausting the flip budget does not prove UNSAT.
+"""
+
 from __future__ import annotations
 
 import random
@@ -7,6 +16,13 @@ from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requeste
 
 
 def _normalise_formula(clauses):
+    """
+    Prepare a CNF formula for local search.
+
+    Duplicate literals are removed and tautological clauses are skipped because
+    they are already satisfied by every assignment. An empty clause is recorded
+    because no complete assignment can satisfy it.
+    """
     clean_clauses = []
     variables = set()
     has_empty_clause = False
@@ -39,6 +55,14 @@ def _normalise_formula(clauses):
 
 
 class _UnsatisfiedTracker:
+    """
+    Incrementally track which clauses are unsatisfied by a complete assignment.
+
+    Local search repeatedly flips one variable. Recomputing every clause after
+    each flip would be expensive, so this tracker stores, for each clause, how
+    many of its literals are currently true. A clause is unsatisfied exactly
+    when that count is zero.
+    """
     def __init__(self, clauses, variables, assignment):
         self.clauses = clauses
         self.assignment = assignment
@@ -60,16 +84,19 @@ class _UnsatisfiedTracker:
                 self._mark_unsatisfied(clause_index)
 
     def _literal_satisfied(self, lit):
+        """Evaluate whether one signed literal is true in the current assignment."""
         value = self.assignment.get(abs(lit), False)
         return (lit > 0 and value) or (lit < 0 and not value)
 
     def _mark_unsatisfied(self, clause_index):
+        """Add a clause to the unsatisfied set if it is not already present."""
         if clause_index in self.unsatisfied_positions:
             return
         self.unsatisfied_positions[clause_index] = len(self.unsatisfied_list)
         self.unsatisfied_list.append(clause_index)
 
     def _mark_satisfied(self, clause_index):
+        """Remove a clause from the unsatisfied set in constant time."""
         position = self.unsatisfied_positions.pop(clause_index, None)
         if position is None:
             return
@@ -80,18 +107,28 @@ class _UnsatisfiedTracker:
             self.unsatisfied_positions[last_clause] = position
 
     def unsatisfied_count(self):
+        """Return the objective value minimized by local search."""
         return len(self.unsatisfied_list)
 
     def random_unsatisfied_clause_index(self, rng):
+        """Choose a currently false clause as the next repair target."""
         return rng.choice(self.unsatisfied_list)
 
     def random_unsatisfied_clause(self, rng):
         return self.clauses[self.random_unsatisfied_clause_index(rng)]
 
     def flip_score(self, variable):
+        """Score a variable by the number of unsatisfied clauses after flipping it."""
         return self.flip_effect(variable)["unsatisfied_after"]
 
     def flip_effect(self, variable):
+        """
+        Compute the make/break effect of flipping one variable.
+
+        make counts clauses that would become satisfied; break counts clauses
+        that would become unsatisfied. The best flips have high make and low
+        break.
+        """
         unsatisfied_after = self.unsatisfied_count()
         make = 0
         break_count = 0
@@ -122,6 +159,12 @@ class _UnsatisfiedTracker:
         }
 
     def flip(self, variable):
+        """
+        Apply one local-search move and update all affected clause counts.
+
+        Only clauses containing the flipped variable can change satisfaction
+        status, so the update is local rather than a full formula scan.
+        """
         current_value = self.assignment[variable]
 
         for clause_index in self.occurrences.get(variable, []):
@@ -156,6 +199,10 @@ def walksat(
 ):
     """
     Incomplete WalkSAT-style local-search SAT solver.
+
+    The solver repeatedly starts from a random complete assignment. During each
+    try it selects an unsatisfied clause and flips one variable in that clause,
+    either randomly or according to a make/break heuristic.
 
     Return:
     - dict {variable: True/False} if SAT
@@ -239,6 +286,7 @@ def walksat(
     last_progress_work = 0
 
     def finish(solution, status):
+        """Set final status fields and return the public result shape."""
         stats["status"] = status
         if status == "SAT":
             stats["termination_reason"] = "sat"
@@ -273,6 +321,12 @@ def walksat(
         emit(event_callback, EVENT_LOG, f"      WalkSAT adaptive noise: {message}")
 
     def choose_weighted(candidates):
+        """
+        Sample one candidate proportionally to its positive weight.
+
+        ProbSAT uses this to prefer good flips while still allowing randomness,
+        which helps escape local minima.
+        """
         total = sum(weight for _variable, _effect, weight in candidates)
         if total <= 0:
             return rng.choice(candidates)
@@ -285,6 +339,13 @@ def walksat(
         return candidates[-1]
 
     def select_variable(clause):
+        """
+        Choose which variable to flip from an unsatisfied clause.
+
+        With probability current_noise, WalkSAT makes a random repair move.
+        Otherwise it uses either ProbSAT's weighted make/break rule or a greedy
+        rule that minimizes the number of unsatisfied clauses after the flip.
+        """
         if rng.random() < current_noise:
             variable = abs(rng.choice(clause))
             effect = tracker.flip_effect(variable)
@@ -358,6 +419,8 @@ def walksat(
         stats["best_assignment"] = {variable: False for variable in variables}
         return finish({variable: False for variable in variables}, "SAT")
 
+    # The optimization objective is the number of unsatisfied clauses. A value
+    # of zero means the current complete assignment is a SAT model.
     best_unsatisfied = len(normalised)
     stats["best_unsatisfied"] = best_unsatisfied
     log_option_summary()
@@ -366,6 +429,9 @@ def walksat(
         if stop_requested(cancel_token):
             return finish(None, cancellation_status(cancel_token))
 
+        # Each try is a restart from a fresh complete assignment. This is not a
+        # logical backtrack; it is a stochastic attempt to enter a better basin
+        # of the search landscape.
         stats["tries"] = try_index
         assignment = {variable: rng.choice((False, True)) for variable in variables}
         tracker = _UnsatisfiedTracker(normalised, variables, assignment)
@@ -393,6 +459,8 @@ def walksat(
                 log_progress()
 
             if unsatisfied_count == 0:
+                # A complete assignment satisfying every clause is an explicit
+                # certificate of satisfiability.
                 stats["best_assignment"] = assignment.copy()
                 stats["restart_stats"].append(
                     {
@@ -429,6 +497,8 @@ def walksat(
             stats["flips"] += 1
             flips_since_global_best += 1
             if adaptive_noise and flips_since_global_best >= stagnation_limit:
+                # When no new global best has appeared for a while, increase
+                # randomness to help escape a local minimum.
                 old_noise = current_noise
                 current_noise = min(0.9, current_noise + 0.05)
                 flips_since_global_best = 0

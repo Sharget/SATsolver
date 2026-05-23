@@ -2,7 +2,10 @@ import unittest
 
 from solvers.cdcl import Clause, cdcl, clause_lbd, learned_clause_delete_key, learned_clauses_to_delete
 from solvers.dpll import dpll
-from problems.n_queens import n_queens_problem
+from problems.clique import clique_var
+from problems.hamiltonian_path import hamiltonian_var
+from problems.independent_set import independent_var
+from problems.n_queens import n_queens_problem, n_queens_var
 from sat_core.dimacs import load_dimacs
 from utils.general_utils import color_var, sudoku_var
 from utils.sudoku_general import generate_sudoku_clauses
@@ -174,7 +177,12 @@ class CDCLTests(unittest.TestCase):
 
     def test_encoder_split_and_sudoku_generation(self):
         self.assertEqual(sudoku_var(1, 2, 3), 10203)
-        self.assertEqual(color_var(2, 3, 10), 13)
+        self.assertEqual(n_queens_var(1, 1, 4), 101)
+        self.assertEqual(color_var(2, 3, 10), 203)
+        self.assertEqual(color_var(2, 101, 101), 2101)
+        self.assertEqual(hamiltonian_var(1, 3, 10), 103)
+        self.assertEqual(clique_var(2, 3, 10), 203)
+        self.assertEqual(independent_var(2, 3, 10), 203)
 
         grid = [[0] * 4 for _ in range(4)]
         clauses = generate_sudoku_clauses(grid)

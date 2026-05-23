@@ -5,3 +5,6 @@
 [CDCL vizualization](https://aziyck.github.io/SATsolver/docs/visualisations/cdcl/)
 
 [WaLkSAT vizualization](https://aziyck.github.io/SATsolver/docs/visualisations/walksat/)
+
+
+TODO: smt related to chess

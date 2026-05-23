@@ -1,3 +1,12 @@
+"""
+Complete DPLL SAT solver.
+
+The procedure searches the space of partial truth assignments for a CNF
+formula. At each node it first applies unit propagation, then chooses an
+unassigned variable and recursively explores the two possible truth values.
+Unlike local-search solvers, DPLL can prove both SAT and UNSAT.
+"""
+
 from __future__ import annotations
 
 import time
@@ -6,6 +15,14 @@ from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requeste
 
 
 def _unit_propagate(clauses, assignment):
+    """
+    Apply the unit-clause rule until no unit clause remains.
+
+    Mathematically, if a clause has only one literal left, every satisfying
+    extension of the current partial assignment must make that literal true.
+    The function returns a simplified formula, or None when a contradiction is
+    found.
+    """
     changed = True
 
     while changed:
@@ -28,6 +45,9 @@ def _unit_propagate(clauses, assignment):
             changed = True
             new_clauses = []
 
+            # Simplify the CNF under the forced literal:
+            # satisfied clauses disappear, and the opposite literal is removed
+            # from clauses where it is now false.
             for current in clauses:
                 if lit in current:
                     continue
@@ -47,6 +67,12 @@ def _unit_propagate(clauses, assignment):
 
 
 def _choose_variable_small_clause(clauses, assignment):
+    """
+    Branch on an unassigned variable from a shortest remaining clause.
+
+    Short clauses are closer to becoming unit or conflicting, so this simple
+    heuristic often exposes contradictions earlier than an arbitrary choice.
+    """
     for clause in sorted(clauses, key=len):
         for lit in clause:
             var = abs(lit)
@@ -68,7 +94,11 @@ def dpll(
     _level=0,
 ):
     """
-    DPLL SAT solver.
+    Recursive DPLL SAT solver.
+
+    clauses is a CNF formula represented as a list of clauses, and assignment
+    is the current partial model. The recursion corresponds to a binary search
+    tree whose levels are decisions on variables.
 
     Return:
     - dict {variable: True/False} if SAT
@@ -149,6 +179,8 @@ def dpll(
 
     choose_var_fn = choose_var_fn or _choose_variable_small_clause
 
+    # First close the current branch under all logically forced assignments.
+    # A conflict here means the branch cannot be extended to a model.
     before_propagation = len(assignment)
     result = _unit_propagate(clauses, assignment.copy())
 
@@ -175,6 +207,9 @@ def dpll(
     if var is None:
         return finish(assignment, "SAT")
 
+    # No more forced moves are available, so DPLL makes a decision and tries
+    # both truth values. Chronological backtracking happens through recursion:
+    # if the first branch fails, control returns here and the second is tried.
     _stats["decisions"] += 1
     log_debug(f"choose variable {var}")
     log_progress()
@@ -191,6 +226,8 @@ def dpll(
         new_clauses = []
         branch_conflict = False
 
+        # Simplify the formula under the decision literal before recursing.
+        # Producing an empty clause is exactly a falsified CNF constraint.
         for clause in clauses:
             if lit in clause:
                 continue

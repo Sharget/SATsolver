@@ -20,18 +20,32 @@ def sudoku_var(r, c, v):
     return (r * 10000) + (c * 100) + v
 
 
+def readable_pair_var(first, second, max_second):
+    """
+    Encode a two-part problem variable as a readable decimal integer.
+
+    The second field uses two digits for normal cases, then widens to the
+    next power of ten when larger values are needed.
+    Example: (2, 3, 10) -> 203, (2, 101, 101) -> 2101.
+    """
+    width = 100
+    while max_second >= width:
+        width *= 10
+    return (first * width) + second
+
+
 def color_var(node, color, colors=None):
     """
     Encode a graph-coloring variable as one integer.
 
     New graph-coloring encoders should pass the total number of colors, which
-    gives a compact collision-free mapping:
-    (node - 1) * colors + color.
+    gives a readable collision-free mapping:
+    readable_pair_var(node, color, colors).
 
     The two-argument form is kept only for old generated files/scripts.
     """
     if colors is not None:
-        return (node - 1) * colors + color
+        return readable_pair_var(node, color, colors)
 
     return (node * 100) + color
 

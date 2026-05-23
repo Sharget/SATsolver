@@ -131,8 +131,11 @@ Decoderul `decode_sudoku` transformă asignarea booleană întoarsă de solver �
 Problema N-Queens este implementată în `problems/n_queens.py`. Variabila SAT este:
 
 ```python
-n_queens_var(row, col, size) = (row - 1) * size + col
+n_queens_var(row, col, size) = readable_pair_var(row, col, size)
 ```
+
+Pentru valori până la 99, al doilea câmp folosește două cifre. Exemplu:
+`n_queens_var(1, 1, 4) = 101`.
 
 Aceasta reprezintă afirmația: există o regină pe linia `row` și coloana `col`.
 
@@ -159,8 +162,11 @@ Aplicația acceptă mai multe moduri de construire a grafului:
 Variabila SAT este produsă prin `color_var(node, color, colors)` din `utils/general_utils.py`:
 
 ```python
-color_var(node, color, colors) = (node - 1) * colors + color
+color_var(node, color, colors) = readable_pair_var(node, color, colors)
 ```
+
+Exemplu: `color_var(2, 3, 10) = 203`. Dacă al doilea câmp depășește 99,
+lățimea se extinde automat: `color_var(2, 101, 101) = 2101`.
 
 Semnificația variabilei este: nodul `node` are culoarea `color`.
 
@@ -179,8 +185,10 @@ Decoderul `decode_coloring` transformă modelul SAT într-o mapare `nod -> culoa
 Hamiltonian Path este implementat în `problems/hamiltonian_path.py`. Variabila SAT este:
 
 ```python
-hamiltonian_var(position, node, node_count) = (position - 1) * node_count + node
+hamiltonian_var(position, node, node_count) = readable_pair_var(position, node, node_count)
 ```
+
+Exemplu: `hamiltonian_var(1, 3, 10) = 103`.
 
 Semnificația este: nodul `node` se află pe poziția `position` în drum.
 
@@ -201,13 +209,13 @@ Clique este implementată în `problems/clique.py`, iar Independent Set în `pro
 Pentru Clique:
 
 ```python
-clique_var(slot, node, node_count) = (slot - 1) * node_count + node
+clique_var(slot, node, node_count) = readable_pair_var(slot, node, node_count)
 ```
 
 Pentru Independent Set:
 
 ```python
-independent_var(slot, node, node_count) = (slot - 1) * node_count + node
+independent_var(slot, node, node_count) = readable_pair_var(slot, node, node_count)
 ```
 
 În ambele cazuri, clauzele impun:

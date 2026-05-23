@@ -87,6 +87,10 @@ def generate_coloring_clauses(graph, k):
 
 def decode_coloring(solution, colors=None):
     coloring = {}
+    width = 100
+    if colors is not None:
+        while colors >= width:
+            width *= 10
 
     for key, value in solution.items():
         if value:
@@ -94,8 +98,8 @@ def decode_coloring(solution, colors=None):
                 v = key // 100
                 c = key % 100
             else:
-                v = (key - 1) // colors + 1
-                c = (key - 1) % colors + 1
+                v = key // width
+                c = key % width
             coloring[v] = c
 
     return coloring

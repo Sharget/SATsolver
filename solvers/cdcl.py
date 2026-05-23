@@ -1,3 +1,13 @@
+"""
+Conflict-Driven Clause Learning (CDCL) SAT solver.
+
+CDCL extends DPLL with an implication graph. Forced assignments remember the
+clause that implied them, conflicts are analysed to derive learned clauses, and
+the solver backjumps directly to the decision level where the learned clause
+becomes useful. Watched literals make propagation efficient, while VSIDS-style
+activity scores, optional restarts, and learned-clause pruning improve search.
+"""
+
 from collections import defaultdict
 from dataclasses import dataclass
 import random
@@ -8,6 +18,15 @@ from sat_core.runtime import EVENT_LOG, cancellation_status, emit, stop_requeste
 
 @dataclass(eq=False)
 class Clause:
+    """
+    One CNF clause plus solver metadata.
+
+    lits is the disjunction of signed literals. watch1 and watch2 identify the
+    two watched literals used by Boolean constraint propagation. learnt marks a
+    clause derived from conflict analysis rather than from the input formula.
+    LBD counts how many decision levels the clause touches; lower values often
+    indicate stronger learned clauses.
+    """
     lits: list[int]
     learnt: bool = False
     watch1: int = 0
@@ -57,6 +76,7 @@ def _normalise_formula(clauses):
 
 
 def _dedupe_clause(lits):
+    """Remove repeated literals while preserving the clause order."""
     clean = []
     seen = set()
 
@@ -91,6 +111,12 @@ def learned_clause_delete_key(clause):
 
 
 def learned_clauses_to_delete(learned, locked, learned_clause_limit):
+    """
+    Choose learned clauses to delete when the learned database is too large.
+
+    Clauses currently used as implication reasons are locked: deleting them
+    would break the implication graph needed for later conflict analysis.
+    """
     remove_count = len(learned) - learned_clause_limit
     if remove_count <= 0:
         return set()
@@ -113,6 +139,11 @@ def cdcl(
 ):
     """
     Conflict-Driven Clause Learning SAT solver.
+
+    The solver maintains a partial assignment, a trail ordered by time, and
+    reason clauses for propagated literals. A conflict triggers First-UIP
+    analysis, which produces a learned clause and a non-chronological
+    backjump level.
 
     Return:
     - dict {variable: True/False} if SAT
@@ -235,7 +266,9 @@ def cdcl(
     if not normalised:
         return finish({}, "SAT")
 
-    # Arrays are faster than dictionaries. They are indexed by variable id.
+    # These arrays represent the current partial assignment and the implication
+    # graph. For each variable, reasons[var] is the clause that forced it; a
+    # None reason means the assignment was a decision.
     assignment = [None] * (max_var + 1)   # None, True, or False
     levels = [0] * (max_var + 1)          # decision level of each assignment
     reasons = [None] * (max_var + 1)      # clause that forced each propagation
@@ -257,6 +290,9 @@ def cdcl(
     var_inc = 1.0
     var_decay = 0.95
 
+    # Initial scores approximate which variables are syntactically important
+    # before any conflicts have been seen. Later, conflict analysis bumps the
+    # activity of variables involved in learned clauses.
     polarity_score = [0] * (max_var + 1)
     occurrence_count = [0] * (max_var + 1)
     for clause in normalised:
@@ -283,6 +319,7 @@ def cdcl(
         return len(trail_lim)
 
     def lit_value(lit):
+        """Evaluate a signed literal under the current partial assignment."""
         value = assignment[abs(lit)]
         if value is None:
             return None
@@ -314,6 +351,13 @@ def cdcl(
         return True
 
     def watch_clause(clause):
+        """
+        Register the initial watched literals for a clause.
+
+        A unit clause watches its only literal twice conceptually; here one
+        stored watch is enough because the clause immediately forces that
+        literal.
+        """
         if len(clause.lits) == 1:
             clause.watch1 = 0
             clause.watch2 = 0
@@ -326,6 +370,7 @@ def cdcl(
         watches[clause.lits[clause.watch2]].append(clause)
 
     def update_active_learned_count():
+        """Refresh statistics for the current learned-clause database."""
         learned = [clause for clause in clauses_db if clause.learnt]
         stats["active_learned_clauses"] = len(learned)
         lbd_values = [clause.lbd for clause in learned if clause.lbd is not None]
@@ -343,6 +388,7 @@ def cdcl(
         watch_clause(clause)
 
     def add_clause(lits, learnt=False, lbd=None):
+        """Create a clause object, attach its watches, and store it."""
         nonlocal learned_sequence
         if learnt:
             learned_sequence += 1
@@ -354,6 +400,8 @@ def cdcl(
         if stop_requested(cancel_token):
             return finish(None, cancellation_status(cancel_token))
 
+        # Input unit clauses are facts at decision level 0. If two such facts
+        # contradict each other, the formula is UNSAT without any search.
         clause = add_clause(lits)
         if len(lits) == 1:
             log_debug(f"unit clause forces {lits[0]}")
@@ -403,6 +451,8 @@ def cdcl(
                     i += 1
                     continue
 
+                # Try to preserve the invariant that every unresolved clause
+                # has at least one watched literal not known to be false.
                 moved_watch = False
                 for new_watch, new_lit in enumerate(clause.lits):
                     if new_watch == clause.watch1 or new_watch == clause.watch2:
@@ -423,6 +473,9 @@ def cdcl(
                 if moved_watch:
                     continue
 
+                # If the other watched literal is false too, every literal in
+                # the clause is false: this is a conflict. Otherwise the clause
+                # is unit and forces the other watched literal.
                 if lit_value(other_lit) is False:
                     return clause
 
@@ -435,6 +488,7 @@ def cdcl(
         return None
 
     def bump_var(var):
+        """Increase a variable's VSIDS-style activity after a conflict."""
         nonlocal var_inc
 
         activity[var] += var_inc
@@ -446,6 +500,7 @@ def cdcl(
             var_inc *= 1e-100
 
     def decay_activity():
+        """Make future conflict bumps relatively more important."""
         nonlocal var_inc
         var_inc /= var_decay
 
@@ -541,6 +596,7 @@ def cdcl(
         qhead = min(qhead, len(trail))
 
     def active_reason_clauses():
+        """Return learned clauses that currently justify propagated literals."""
         locked = set()
         for var in variables:
             reason = reasons[var]
@@ -549,6 +605,12 @@ def cdcl(
         return locked
 
     def prune_learned_clauses():
+        """
+        Delete weak learned clauses when a limit is configured.
+
+        The solver keeps clauses that are active reasons in the implication
+        graph and prefers to keep short or low-LBD clauses.
+        """
         if learned_clause_limit is None:
             return
 
@@ -578,6 +640,7 @@ def cdcl(
         update_active_learned_count()
 
     def unresolved_clause_lits():
+        """Yield the still-unresolved literals of clauses not yet satisfied."""
         for clause in clauses_db:
             unresolved = []
             satisfied = False
@@ -592,6 +655,7 @@ def cdcl(
                 yield unresolved
 
     def pick_branch_var():
+        """VSIDS branch choice: pick the unassigned variable with max activity."""
         best_var = None
         best_score = -1.0
 
@@ -603,6 +667,7 @@ def cdcl(
         return best_var
 
     def pick_most_frequent_var():
+        """Static heuristic: pick the unassigned variable with most occurrences."""
         best_var = None
         best_score = -1
         for var in variables:
@@ -612,6 +677,11 @@ def cdcl(
         return best_var
 
     def pick_moms_var():
+        """
+        MOMS heuristic: focus on variables in the shortest unresolved clauses.
+
+        Such clauses are nearest to unit propagation or conflict.
+        """
         shortest = None
         scores = defaultdict(int)
         for unresolved in unresolved_clause_lits():
@@ -630,6 +700,11 @@ def cdcl(
         return max(scores, key=lambda var: (scores[var], occurrence_count[var], -var))
 
     def pick_dlis_decision():
+        """
+        DLIS heuristic: choose the literal satisfying the most unresolved clauses.
+
+        Unlike variable-only heuristics, DLIS also suggests the branch phase.
+        """
         literal_scores = defaultdict(int)
         for unresolved in unresolved_clause_lits():
             for lit in unresolved:
@@ -643,10 +718,12 @@ def cdcl(
         return abs(best_lit), best_lit > 0
 
     def pick_random_var():
+        """Random branch choice, useful as a baseline heuristic."""
         candidates = [var for var in variables if assignment[var] is None]
         return rng.choice(candidates) if candidates else None
 
     def pick_branch_decision():
+        """Dispatch to the configured branching heuristic."""
         if branching_mode == "Most frequent":
             return pick_most_frequent_var(), None
         if branching_mode == "MOMS":
@@ -658,6 +735,12 @@ def cdcl(
         return pick_branch_var(), None
 
     def choose_phase(var, branch_phase=None):
+        """
+        Choose the truth value for a decision variable.
+
+        saved_phase implements phase saving: after a variable was useful with a
+        truth value, later decisions try that value again.
+        """
         if branch_phase is not None:
             return branch_phase
         if initial_phase_mode == "Random":
@@ -680,12 +763,16 @@ def cdcl(
             log_debug(f"conflict {stats['conflicts']} at level {current_level()}")
             log_progress()
 
+            # A level-0 conflict means the original formula itself is
+            # contradictory under all mandatory propagations.
             if current_level() == 0:
                 return finish(None, "UNSAT")
 
             if max_conflicts is not None and stats["conflicts"] >= max_conflicts:
                 return finish(None, "UNKNOWN")
 
+            # Resolve the conflict through the implication graph, learn a new
+            # clause, and jump to the level where that clause becomes asserting.
             learnt_lits, backjump_level = analyse_conflict(conflict)
             decay_activity()
             log_debug(f"learned clause size {len(learnt_lits)}; backjump to level {backjump_level}")
@@ -717,6 +804,8 @@ def cdcl(
                 and stats["conflicts"] - conflicts_at_last_restart >= restart_interval
                 and current_level() > 0
             ):
+                # A restart discards the current decisions but keeps learned
+                # clauses, so future search starts from a stronger formula.
                 conflicts_at_last_restart = stats["conflicts"]
                 stats["restarts"] += 1
                 log_debug(f"restart {stats['restarts']} after {stats['conflicts']} conflicts")
@@ -727,9 +816,13 @@ def cdcl(
         decision_var, branch_phase = pick_branch_decision()
 
         if decision_var is None:
+            # Every variable appearing in the formula has a value and no clause
+            # is conflicting, so the current assignment is a satisfying model.
             solution = {var: assignment[var] for var in variables if assignment[var] is not None}
             return finish(solution, "SAT")
 
+        # Start a new decision level. Subsequent propagations record this level
+        # and can later be erased together by backtracking/backjumping.
         trail_lim.append(len(trail))
         stats["decisions"] += 1
 

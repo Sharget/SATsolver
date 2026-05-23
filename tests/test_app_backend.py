@@ -1036,7 +1036,7 @@ class AppBackendTests(unittest.TestCase):
         self.assertEqual(problem.metadata["requested_edges"], 40)
         self.assertTrue(problem.metadata["edge_request_clamped"])
 
-    def test_compact_color_encoding_does_not_collide(self):
+    def test_readable_color_encoding_does_not_collide_when_width_expands(self):
         colors = 101
         seen = {
             color_var(node, color, colors)
@@ -1045,8 +1045,9 @@ class AppBackendTests(unittest.TestCase):
         }
 
         self.assertEqual(len(seen), 3 * colors)
+        self.assertEqual(color_var(2, 101, colors), 2101)
 
-    def test_decode_coloring_with_compact_encoding(self):
+    def test_decode_coloring_with_readable_encoding(self):
         solution = {
             color_var(1, 2, 3): True,
             color_var(2, 1, 3): True,
@@ -1054,6 +1055,14 @@ class AppBackendTests(unittest.TestCase):
         }
 
         self.assertEqual(decode_coloring(solution, 3), {1: 2, 2: 1, 3: 3})
+
+    def test_decode_coloring_with_expanded_readable_encoding(self):
+        solution = {
+            color_var(1, 100, 101): True,
+            color_var(2, 101, 101): True,
+        }
+
+        self.assertEqual(decode_coloring(solution, 101), {1: 100, 2: 101})
 
     def test_app_can_be_instantiated(self):
         try:

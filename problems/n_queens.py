@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from sat_core.models import ProblemInstance
+from utils.general_utils import readable_pair_var
 
 
 def n_queens_var(row: int, col: int, size: int) -> int:
-    return (row - 1) * size + col
+    return readable_pair_var(row, col, size)
 
 
 def decode_n_queens(solution: dict[int, bool], size: int) -> dict:
